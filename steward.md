@@ -38,6 +38,12 @@ Ego 系统是本项目的核心产物，目标是通用机器人。仿真环境�
 | EH | Ego Harness | 自我智能体：每个机器人一个 DeepSeek Harness 实例，负责任务理解、长时规划、技能编排与异常处理。 |
 | EA | Ego Agent | 运行在 EH 中的智能体会话（Session）。 |
 | ES Error | Ego-State Error | ES 相对 GT 的误差，只能由 Steward 平面计算。 |
+| SceneState | Scene State | WS 与 ES 共用的场景数据结构，见 4.2。 |
+| Entity | Entity | 场景中一个可独立存在的物理对象（墙体、家具、杯子、机器人、衣服）。 |
+| Link | Link | 实体中的一个刚体部件（柜体、抽屉、刀片、机械臂的一节）。 |
+| Joint | Joint | 连接两个 Link 的关节（固定、旋转、滑动、球铰）。 |
+| Deformable | Deformable Body | 柔性体（布料、软体、绳线）。 |
+| Spatial Layer | Spatial Layer | 场景级空间表示（占据、TSDF、ESDF、语义区域），存放不属于任何已识别实体的信息。 |
 | Observer | Observer | Steward 中只读采集 GT 与各机器人 ES 快照并计算指标的组件。 |
 | Episode | Episode | 一个 Scenario 的一次完整运行。 |
 | Tick | Tick | 仿真时钟的一个固定步长。 |
@@ -70,6 +76,14 @@ Ego 系统是本项目的核心产物，目标是通用机器人。仿真环境�
 | mjSpec | MuJoCo model specification API | MuJoCo 的程序化模型编辑接口，可在运行时修改模型并重新编译，是运行中增删资产的候选实现方式。 |
 | URDF | Unified Robot Description Format | 常见的机器人描述格式，可转换为 MJCF。 |
 | GLB / OBJ / STL | — | 常见三维网格格式，用于资产的外观与碰撞几何。 |
+| RGB-D | Red Green Blue + Depth | 彩色图像加逐像素深度的相机输出。 |
+| SDF | Signed Distance Field | 有符号距离场：空间中每点到最近表面的有符号距离。 |
+| TSDF | Truncated Signed Distance Field | 截断符号距离场，常用于多帧深度融合与表面重建。 |
+| ESDF | Euclidean Signed Distance Field | 欧氏符号距离场，常用于运动规划中的碰撞距离与梯度。 |
+| Voxel | Volume Element | 体素：三维规则网格中的一个格子。 |
+| NEES | Normalized Estimation Error Squared | 归一化估计误差平方，用于检验估计的不确定度是否校准。 |
+| IoU | Intersection over Union | 交并比，用于比较两个占据区域的重合程度。 |
+| Chamfer Distance | Chamfer Distance | 两个点集之间双向最近点距离的平均，用于比较几何形状。 |
 | MCAP | MCAP | 机器人领域常用的多通道时间序列日志格式。 |
 | RT | Real-Time | 实时，指有确定时限的控制回路。 |
 | IPC | Inter-Process Communication | 进程间通信。 |
@@ -150,41 +164,282 @@ ES 与 GT 有三类差异，Steward 分别度量：
 
 WH 注入的扰动专门制造第三类差异：世界变了，机器人必须自己发现。
 
-### 4.2 ES 数据模型
+### 4.2 统一场景数据模型（WS 与 ES）
 
-ES 是有版本号的快照序列，每次感知更新生成新版本。核心字段如下（示意，传输格式由 `ego-protocol` 定义）：
+#### 4.2.1 设计原则：一套结构，两种实例
+
+WS 与 ES 使用**同一套数据结构**，称为场景状态 `SceneState`。区别只在于两个实例参数：
+
+| 实例 | 记法 | id 类型 | 数值含义 | 完整性 | 坐标系 |
+|---|---|---|---|---|---|
+| WS | `SceneState<'world'>` | `WorldEntityId`（GT id） | 精确真值，不带不确定度 | 完整：世界中所有实体 | `world` |
+| ES | `SceneState<'ego'>` | `EgoEntityId`（机器人自行分配） | 估计值，带不确定度、来源与观测时间 | 局部：只含已感知或已推断的实体 | 机器人自己的 `map` 坐标系 |
+
+这样做的好处：
+
+- **对比直接**：Observer 只需把 ES 实体关联到 WS 实体，就能逐字段计算误差，不需要两套结构之间的转换。
+- **代码共用**：WSim 与 ESim 都从同一结构构建 MuJoCo 模型；可视化、校验、序列化共用一份实现。
+- **一致性靠构造保证**：结构定义在独立的 `scene-schema` 包中（Protobuf 为权威定义，Python、C++、TypeScript 代码由它生成），`world-protocol` 与 `ego-protocol` 都引用它，而不是各写一份。
+- **隔离可检查**：两种 id 是不同的品牌类型。ES 中出现 `WorldEntityId` 或资产引用，校验器直接拒绝，作为信息泄漏的自动检测。
+
+类型总数刻意控制为 **8 个核心类型**：
+
+| 类型 | 作用 |
+|---|---|
+| `Est<T>` | 可估计量的统一包装：WS 中只有真值，ES 中附带不确定度 |
+| `SceneState` | 场景快照容器：实体、关系、空间层 |
+| `Entity` | 场景中一个独立的物理对象：墙体、家具、杯子、剪刀、机器人、衣服 |
+| `Link` | 刚体部件 |
+| `Joint` | 连接两个 Link 的关节 |
+| `Deformable` | 柔性体 |
+| `Geometry` | 几何表示（基本体、网格、点云、SDF） |
+| `Relation` | 实体之间的关系：附着、支撑、包含 |
+
+另有两个仅用于机器人本体的部件说明 `Sensor`、`Actuator`，以及场景级的空间层 `SpatialLayers`（4.2.6）。
+
+**物体类型不是新的数据类型**。墙、抽屉柜、剪刀、机器人的差别全部由字段取值表达：根关节是否固定、有几个 Link 和 Joint、关节是否带执行器、body 是刚体树还是柔性体。
+
+#### 4.2.2 `Est<T>`：可估计量
 
 ```ts
-interface EgoState {
-  version: number                 // 单调递增
-  stamp: SimOrWallTime            // 产生时刻（仿真时间或真实时间）
-  self: {
-    basePose: PoseBelief          // 机身位姿（均值 + 协方差）
-    joints: JointState[]          // 关节角、速度、力矩
-    grasp: GraspState[]           // 各末端执行器持有的物体
-  }
-  objects: ObjectBelief[]
-  freeSpace: OccupancyMap         // 已知空闲 / 已知占据 / 未知
-  semantics: SceneGraph           // 房间、家具、"杯子在桌上"等关系
+interface Est<T> {
+  value: T                  // WS：真值；ES：估计值（连续量取均值，离散量取众数）
+  unc?: Uncertainty<T>      // WS：必须缺省；ES：按需提供
+  t?: Time                  // ES：最后一次被观测或更新的时间
+  src?: 'observed' | 'fused' | 'prior' | 'inferred' | 'predicted'  // ES：信息来源
 }
 
-interface ObjectBelief {
-  id: EgoObjectId                 // 机器人自己分配的 id，与 GT id 无关
-  category: Distribution<string>  // 类别分布
-  pose: PoseBelief                // SE(3) 均值 + 6x6 协方差
-  shape: ShapeEstimate            // 几何近似（包围盒、网格、点云）
-  physical: PhysicalEstimate      // 质量、摩擦、易碎度等先验或估计
-  affordances: Affordance[]
-  existence: number               // 存在概率
-  lastObserved: SimOrWallTime
+type Uncertainty<T> =
+  | { kind: 'gaussian'; cov: number[] }                        // 连续量；位姿为切空间 6x6 协方差
+  | { kind: 'categorical'; p: Record<string, number> }         // 离散量：类别、关节类型、开关状态
+  | { kind: 'interval'; lo: T; hi: T }                         // 只知道范围：关节限位、质量
+  | { kind: 'samples'; samples: T[]; weights?: number[] }      // 多峰分布：粒子
+```
+
+所有"机器人可能估错"的字段都用 `Est<T>` 包装：位姿、关节角、尺寸、类别、物理参数、关节类型，甚至"这张桌子是否固定在地上"。ESim 的不确定度采样（4.3）直接从这些 `unc` 中抽样。
+
+#### 4.2.3 核心结构
+
+```ts
+type Mode = 'world' | 'ego'
+
+interface SceneState<M extends Mode> {
+  mode: M
+  version: number                  // 单调递增
+  stamp: Time                      // 仿真时间或真实时间
+  frame: M extends 'world' ? 'world' : 'map'
+  entities: Entity<M>[]
+  relations: Relation<M>[]
+  layers: SpatialLayers<M>
+  self?: EntityId<M>               // ES：机器人自身对应的实体
+}
+
+interface Entity<M extends Mode> {
+  id: EntityId<M>                  // WorldEntityId 或 EgoEntityId
+  role: 'environment' | 'object' | 'robot' | 'actor'   // actor：行人、宠物等自主运动实体
+  category: Est<string>            // 墙、桌子、杯子、衬衫…
+  pose: Est<Pose>                  // 根部件在场景坐标系中的位姿
+  twist?: Est<Twist>               // 根部件速度
+  body: RigidTree<M> | Deformable<M>
+  stateVars: Record<string, Est<Scalar>>   // 非几何状态：开关、温度、填充量、是否破损
+  existence: number                // WS 恒为 1；ES 为存在概率
+  asset?: AssetRef                 // 仅 WS：资产库引用
+}
+
+interface RigidTree<M extends Mode> {
+  kind: 'rigid'
+  root: Est<'fixed' | 'planar' | 'free'>   // 根部件与世界的连接：固定 / 地面平面运动 3-DoF / 自由 6-DoF
+  links: Link<M>[]                 // links[0] 为根部件
+  joints: Joint<M>[]               // 树结构：每个非根 Link 恰有一个父 Joint
+}
+
+interface Link<M extends Mode> {
+  id: LinkId
+  name: string                     // 柜体、抽屉、门扇、刀片、上臂…
+  geometry: {
+    visual?: Geometry[]            // 外观，用于渲染
+    collision?: Geometry[]         // 碰撞与接触，用于物理仿真与规划
+    observed?: Geometry[]          // 仅 ES：实际观测到的几何（点云、融合表面）
+  }
+  inertial?: Est<Inertial>         // 质量、质心、惯量
+  material?: Est<Material>         // 摩擦、恢复系数、易碎阈值
+  affordances: Est<Affordance>[]   // 部件级：把手可抓、刀刃可切、门可推
+  sensors?: Sensor[]               // 仅机器人
+}
+
+interface Joint<M extends Mode> {
+  id: JointId
+  parent: LinkId
+  child: LinkId
+  type: Est<'fixed' | 'revolute' | 'prismatic' | 'ball'>
+  origin: Est<Pose>                // 关节坐标系在父部件中的位姿
+  axis?: Est<Vec3>
+  limits?: Est<{ lo: number; hi: number }>
+  q: Est<number[]>                 // 关节位置
+  qd: Est<number[]>                // 关节速度
+  dynamics?: Est<{ damping: number; friction: number; stiffness: number; springRef?: number }>
+  locked?: Est<boolean>            // 门锁、抽屉卡住
+  actuator?: Actuator              // 有执行器即为可驱动关节（机器人、行人）
+}
+
+interface Deformable<M extends Mode> {
+  kind: 'deformable'
+  model: 'cloth' | 'volume' | 'cable'   // 布料 / 软体 / 绳线
+  rest: GeometryRef                // 静止形状与拓扑（网格）
+  nodes?: Est<Vec3[]>              // 当前节点位置：WS 完整；ES 通常缺省
+  keypoints: Est<Keypoint[]>       // 语义关键点：领口、袖口、衣角、绳端
+  surface?: Geometry               // ES：观测到的表面（点云或粗网格）
+  material: Est<{ stretch: number; bend: number; shear: number; damping: number; density: number }>
+}
+
+interface Relation<M extends Mode> {
+  type: 'attached' | 'supported-by' | 'contained-in'
+  a: Anchor<M>                     // 实体 + 可选的部件 id 或柔性体节点索引
+  b: Anchor<M>
+  mode?: 'rigid' | 'pinned'        // attached 专用：刚性固连（被抓取）或点约束（衣服挂在衣架上）
+  derived: boolean                 // true：由接触与几何推导；false：物理约束
+  confidence?: number              // 仅 ES
+}
+
+interface Sensor {                 // 机器人部件上的传感器
+  id: SensorId
+  kind: 'rgb' | 'depth' | 'rgbd' | 'imu' | 'force-torque' | 'tactile' | 'encoder'
+  mount: Pose                      // 相对所在部件
+  intrinsics?: CameraIntrinsics
+  rateHz: number
+}
+
+interface Actuator {               // 关节执行器
+  kind: 'position' | 'velocity' | 'torque'
+  limits: { effort: number; velocity: number }
+  gear?: number
 }
 ```
 
+大体积数据（网格、点云、体素块）不内嵌在状态消息中，而以内容寻址的 `GeometryRef`（数据块哈希）引用，与资产库和 Recorder 共用同一块存储。这样状态消息可以高频传输，大数据按需拉取并可缓存。
+
+#### 4.2.4 各类物体的表示方式
+
+全部物体只用 `Entity` 表示，`body` 只有两种：`RigidTree`（刚体树，单个刚体是只有一个 Link 的树）和 `Deformable`（柔性体）。
+
+| 物体 | body | root | Link / Joint | 执行器 | 要点 |
+|---|---|---|---|---|---|
+| 墙壁、地面、天花板 | `RigidTree` | `fixed` | 每面墙一个 Link，彼此以 `fixed` 关节相连 | 无 | 推荐整个建筑外壳作为一个 `environment` 实体；碰撞几何用盒体或平面，外观用网格 |
+| 固定障碍物（没有可开部件的柜子、固定的台面） | `RigidTree` | `fixed` | 1 个 Link，无 Joint | 无 | 与墙体结构相同，只是 `role: 'object'` |
+| 可移动刚体（杯子、椅子、碗） | `RigidTree` | `free`（椅子可用 `planar`） | 1 个 Link，无 Joint | 无 | 被推动或被抓取时，pose 变化 |
+| 可操控铰接物体（抽屉柜、冰箱、门） | `RigidTree` | `fixed` | 柜体为根 Link；抽屉为子 Link，`prismatic` 关节；门扇为子 Link，`revolute` 关节 | 无（被动） | 限位、阻尼、自动回位弹簧写在 `limits`、`dynamics`；锁写在 `locked`；把手是 Link 上的 `affordance` |
+| 房门 | `RigidTree` | — | 作为建筑实体的子 Link，以 `revolute` 关节连接门框 | 无 | 门属于墙，不另建实体 |
+| 自由铰接物体（剪刀、钳子、笔记本电脑） | `RigidTree` | `free` | 两片刀身两个 Link，以 `revolute` 关节相连 | 无（被动） | 与抽屉柜的唯一区别是根部件可自由移动 |
+| 机器人本体 | `RigidTree` | 移动底盘 `planar`；固定机械臂 `fixed`；人形 `free` | 多个 Link 与 Joint | 可驱动关节带 `Actuator` | `role: 'robot'`；传感器挂在部件上；被抓物体通过 `attached`（`rigid`）关系连接到夹爪部件 |
+| 行人、宠物 | `RigidTree` | `planar` 或 `free` | 简化骨架或单个 Link | 由 WSim 行为模型驱动 | `role: 'actor'`；ES 中通常只有 pose、速度与粗略形状 |
+| 柔性物体（挂在衣架上的衣服、毛巾、电线） | `Deformable` | — | — | 无 | 衣服与衣架是两个实体，以 `attached`（`pinned`）关系连接：衣服的若干节点固定在衣架部件上 |
+| 状态变化（灶台开关、杯中水量、玻璃破碎） | 任意 | — | — | — | 用 `stateVars` 表示，例如 `{ "on": true }`、`{ "fillLevel": 0.6 }`、`{ "broken": true }`；液体与颗粒不做逐粒子建模 |
+
+几个判断规则：
+
+- **固定还是可动**：看 `root`，不看类别。ES 中可以不确定，例如 `root = { value: 'free', unc: { kind: 'categorical', p: { fixed: 0.3, free: 0.7 } } }`，先验来自类别（桌子多半不固定，台面多半固定）。
+- **简单物体还是铰接物体**：看 `joints` 是否为空。ES 中一开始可能把抽屉柜当作单个固定 Link，直到看见抽屉缝或拉开抽屉后再细化为两个 Link 加一个 `prismatic` 关节。这种模型细化是 ES 正常的更新方式，结构本身不变。
+- **被动还是主动**：看关节有无 `actuator`。机器人与行人有，剪刀与抽屉没有。
+- **部件还是独立实体**：能整体脱离、独立移动的是实体（杯子、衣架、衣服），只能绕关节相对运动的是部件（抽屉、门扇、刀片）。
+
+#### 4.2.5 WS 与 ES 的字段差异
+
+| 字段 | WS | ES |
+|---|---|---|
+| `id` | `WorldEntityId` | `EgoEntityId`，与 GT 无关 |
+| `Est.unc` / `t` / `src` | 必须缺省 | 按需提供 |
+| `existence` | 恒为 1 | 0–1 的概率 |
+| `asset` | 有 | 必须缺省 |
+| `geometry.observed` | 缺省 | 有，存放实际观测到的点云或融合表面 |
+| `geometry.collision` | 精确碰撞体 | 按不确定度保守放大后的估计碰撞体 |
+| `Deformable.nodes` | 完整节点位置 | 通常缺省，用 `keypoints` 与 `surface` 表示 |
+| `Relation.derived=false` | 物理约束（抓取、挂钩） | 机器人推断的约束，带 `confidence` |
+| `self` | 缺省 | 指向机器人自身实体 |
+| 机器人自身的关节角 | 精确 | 来自编码器，不确定度很小 |
+| 机器人自身的底盘位姿 | 精确 | 来自定位，不确定度较大 |
+| 坐标系 | `world` | 机器人自己的 `map`，与 `world` 之间的变换机器人不知道 |
+
+`scene-schema` 提供两个校验器：`validateWorld` 与 `validateEgo`，分别检查上表规则。遥测通道上的 ES 快照先过 `validateEgo`，发现 GT 字段即判定为泄漏。
+
+Observer 的对比流程：先估计 `world` 与 `map` 之间的变换（用初始位姿真值或点云配准），再按位姿与类别关联实体，然后逐字段计算误差。除位置、姿态、关节角、类别误差外，还计算 NEES（Normalized Estimation Error Squared，归一化估计误差平方），检验机器人报告的不确定度是否校准：误差显著大于协方差所预期的值，说明机器人过度自信。
+
+#### 4.2.6 空间层 `SpatialLayers`
+
+实体是以物体为中心的表示。仍有大量信息不属于任何已识别的实体：哪些空间是空的、哪些还没看过、看到了但还没分割出来的杂物。这些放在场景级空间层中：
+
+```ts
+interface SpatialLayers<M extends Mode> {
+  occupancy?: VoxelLayer<{ logOdds: number }>   // 3D 占据：空闲 / 占据 / 未知
+  tsdf?: VoxelLayer<{ d: number; w: number }>   // 截断符号距离 + 权重：多帧深度融合
+  esdf?: VoxelLayer<{ d: number }>              // 欧氏距离场：运动规划的碰撞代价与梯度
+  costmap2d?: GridLayer<{ cost: number }>       // 由 occupancy 投影的 2D 导航代价图
+  regions: Region[]                             // 语义区域：厨房、走廊（多边形或体积 + 标签）
+  unassigned?: GeometryRef                      // 已观测但未归属任何实体的点云
+}
+```
+
+- ES 中，空间层是主要的感知积累方式。物体从 `unassigned` 中分割并识别出来后，"提升"为实体，几何取自对应的层数据。
+- WS 中，空间层可由 GT 计算得到，只用于评估（例如已探索空间比例、占据栅格 IoU）和触发器的区域判定，不是 WSim 的物理依据。
+- 体素层使用稀疏分块存储（只存有数据的块），以支持房间到整栋房屋的尺度。
+
+#### 4.2.7 几何与空间表示的选择
+
+先区分**观测**与**状态**：RGB-D 图像与深度图是传感器的原始观测，只在传感器通道和 Recorder 中流转，不作为 SceneState 的字段。状态中保存的是融合、识别之后的结果。
+
+| 表示 | 本质 | 优点 | 缺点 | 在 WS 中 | 在 ES 中 |
+|---|---|---|---|---|---|
+| RGB-D / 深度图 | 相机坐标系下的 2.5D 图像 | 传感器原生，信息最全，GPU 渲染直接产出 | 单视角、有遮挡，不能直接表达三维空间 | Renderer 的输出 | 感知输入；只保存关键帧引用 |
+| 点云 | 无序三维点集 | 直接来自深度反投影或激光雷达，易于拼接，适合位姿估计与抓取 | 没有拓扑和表面，不能区分"空闲"与"未知" | 不使用 | 物体的 `observed` 几何、`unassigned` 层 |
+| Occupancy（占据栅格 / 体素） | 每个格子的占据概率 | 显式表达空闲、占据、**未知**，是探索与安全导航的基础 | 分辨率与内存折中，表面粗糙 | 评估用（由 GT 计算） | 场景级 `occupancy` 层与 2D 代价图 |
+| Voxel（体素网格） | 规则三维格子，可携带任意值 | 通用容器：占据、TSDF、ESDF、语义标签都存放在体素中 | 稠密存储内存大，需稀疏分块 | 评估用 | 空间层的底层存储 |
+| SDF | 到最近表面的有符号距离 | TSDF 适合融合多帧深度并提取网格；ESDF 提供碰撞距离与梯度，适合轨迹优化 | 需要持续维护，动态物体更新成本高 | 可由网格计算 | `tsdf` 用于重建，`esdf` 用于运动规划；也可作为单个物体的形状 |
+| Mesh（三角网格） | 顶点 + 面 | 精确表面，适合渲染与接触；可做凸分解用于物理 | 难以从噪声数据直接得到，拓扑变化难处理 | 资产的外观与碰撞几何（凸分解） | 从 TSDF 提取的物体表面，或匹配到的类别形状先验 |
+| 基本体（盒、球、胶囊、圆柱、平面） | 参数化形状 | 最紧凑，碰撞检测最快，便于不确定度表达 | 只能近似 | 墙、地面、家具的碰撞体 | 早期粗略形状、保守碰撞体、ESim 中的快速推演 |
+
+按用途选择：
+
+| 用途 | 首选 | 备选 |
+|---|---|---|
+| 传感器原始数据 | RGB-D 图像 | 激光雷达点云 |
+| 多帧融合重建 | TSDF 体素 → 提取网格 | 点云累积 |
+| 探索与"未知区域" | 3D Occupancy | — |
+| 地面导航 | 2D 代价图（由 Occupancy 投影） | — |
+| 机械臂与全身运动规划 | ESDF + 机器人自身用基本体 | 点云碰撞检测 |
+| 物理仿真接触（WSim、ESim） | 基本体 + 凸分解网格 | 柔性体用网格节点 |
+| 渲染 | 外观网格 + 材质 | — |
+| 物体位姿估计 | 物体点云 | 网格模板匹配 |
+| 抓取规划 | 物体点云或网格 | 基本体 |
+| 柔性物体 | WS：网格节点；ES：关键点 + 观测点云 | 粗网格 |
+| Observer 几何误差 | 网格 vs 网格或点云的 Chamfer 距离 | 占据栅格 IoU |
+
+几条规则：
+
+1. **一个 Link 可以同时有多种几何**，按 `visual`、`collision`、`observed` 区分用途，不强迫统一成一种表示。
+2. **ES 中的几何随观测逐级精化**：基本体（初见）→ 点云（多次观测）→ TSDF 网格或匹配到的形状先验（充分观测）。表示升级不改变实体 id 与结构。
+3. **安全相关的碰撞判断使用保守几何**：ES 的碰撞体按位姿与形状不确定度放大，未知空间按占据处理。
+4. **体素分辨率按用途分层**：导航可用 5 cm，操作区域局部可用 1 cm 以下。
+
+#### 4.2.8 与 MuJoCo 的映射
+
+| SceneState | MuJoCo（MJCF） |
+|---|---|
+| `Entity` + `RigidTree` | 一棵 `body` 子树；`root: free` 对应 `freejoint`，`planar` 对应平面滑动与旋转关节组合，`fixed` 对应直接挂在 `worldbody` 下 |
+| `Link` | `body` |
+| `Link.geometry.collision` | `geom`（基本体或凸分解网格） |
+| `Joint` | `joint`（`hinge`、`slide`、`ball`） |
+| `Joint.actuator` | `actuator`（`position`、`velocity`、`motor`） |
+| `Sensor` | `camera`、`sensor` |
+| `Deformable` | 候选为 MuJoCo 的柔性体（flex / flexcomp），具体能力需按所用版本验证 |
+| `Relation`（`attached`，非推导） | 等式约束（`weld`、`connect`） |
+| `stateVars` | 由 Steward 自身的状态机维护，必要时映射为参数变化（例如破碎后替换几何） |
+
+WSim 由 WS 构建模型；ESim 由 ES 构建模型，并从 `Est.unc` 中采样多组参数生成多个推演场景。两者共用同一个"SceneState → MJCF"转换器。
+
 关键约束：
 
-- ES 中的物体 id 由机器人自行分配。Observer 通过数据关联（匹配）把 ES 物体对应到 GT 物体来计算误差，机器人不知道 GT id。
-- 不确定度是一等公民。ESim 与规划都必须使用协方差，不能只用均值。
-- ES 的更新由 ER 中的状态估计器以传感器频率进行，与 EH 无关。
+- ES 中的实体 id 由机器人自行分配。Observer 通过数据关联把 ES 实体对应到 GT 实体来计算误差，机器人不知道 GT id。
+- 不确定度是一等公民。ESim 与规划都必须使用 `unc`，不能只用 `value`。
+- ES 的更新由 ER 中的状态估计器以传感器频率进行，与 EH 无关。EH 读到的是 ES 的结构化摘要，不是完整的 SceneState。
 
 ### 4.3 ESim：自我仿真
 
@@ -676,6 +931,8 @@ flowchart LR
 | 语义 | 类别、affordance、易碎阈值、"可被推倒"等标签 | Observer、Renderer 的分割通道；**不发给机器人** |
 | 元数据 | 来源、生成脚本、校验报告、版本、内容哈希 | WH、Recorder |
 
+资产按 4.2 的 `Entity` 结构组织：一个资产即一个实体模板（`RigidTree` 或 `Deformable`，含 Link、Joint、几何与物理参数）。放入场景时实例化为 WS 中的 `Entity`，`asset` 字段记录资产 id 与版本。
+
 资产构建复用上游 DSH 的编码智能体能力：WH 用上游文件与 shell 工具在资产工作区中编写 MJCF 和 Python 生成脚本，并用上游沙箱把写入范围限制在该工作区内。WH 编写的生成脚本本身也是资产的一部分，便于批量生成变体（不同尺寸的桌子、随机摆放的餐具）。
 
 ### 6.13 交互式动态扰动
@@ -813,7 +1070,7 @@ Steward 仓库 [hengliao1972/steward](https://github.com/hengliao1972/steward) �
 
 ### P5 防腐层：DSH 依赖只出现在适配包
 
-- `ego-protocol`、`world-protocol`、ER、WSim、Renderer、Observer **零 DSH 依赖**。
+- `scene-schema`、`ego-protocol`、`world-protocol`、ER、WSim、Renderer、Observer **零 DSH 依赖**。
 - 所有 `@deepseek-ai/*` 导入集中在 `steward/dsh/` 下的适配包中。上游 API 变化（公开 API 仍为 pre-stable）只影响这一层。
 - 实时部分可以独立演进，也可在不使用 DSH 的场景中复用。
 
@@ -899,7 +1156,7 @@ DSH 不在任何实时回路中：ER 层安全监督不依赖 EH，WSim 的物�
 
 | 类别 | KPI |
 |---|---|
-| ES 质量 | 物体召回率、位置 / 姿态误差、类别准确率、陈旧率、误差随时间的下降曲线 |
+| ES 质量 | 物体召回率、位置 / 姿态误差、关节状态误差、类别准确率、几何误差（Chamfer 距离）、占据栅格 IoU、不确定度校准（NEES）、陈旧率、误差随时间的下降曲线 |
 | 预测质量 | ESim 预测与实际结果的偏差、风险预测的校准度（预测风险 vs 实际事故率） |
 | 扰动响应 | 发现延迟（扰动发生到 ES 反映变化）、重规划延迟、扰动后任务成功率、扰动引发的事故 |
 | 安全 | 碰撞次数、跌落 / 破碎事件、守卫否决次数与正确性 |
@@ -928,8 +1185,9 @@ steward（fork 仓库根目录）
 ├── steward.md                       # 本设计文档
 └── steward/                         # Steward 独立 pnpm 工作区
     ├── protocol/
-    │   ├── ego-protocol/            # ER ↔ EH、遥测（零 DSH 依赖）
-    │   └── world-protocol/          # WCA（零 DSH 依赖）
+    │   ├── scene-schema/            # SceneState 权威定义（Protobuf）、校验器、SceneState → MJCF 转换器
+    │   ├── ego-protocol/            # ER ↔ EH、遥测；引用 scene-schema（零 DSH 依赖）
+    │   └── world-protocol/          # WCA；引用 scene-schema（零 DSH 依赖）
     ├── world/                       # WSim、触发器引擎、Renderer、Clock（Python / C++，MuJoCo）
     ├── assets/                      # Asset Library、Validator、资产生成脚本
     ├── observer/                    # Observer、Evaluator、Recorder
