@@ -27,6 +27,18 @@ def test_running_clock_restarts_after_reset_and_does_not_jump_on_speed_change(ki
         sim.stop()
 
 
+def test_free_camera_view_hides_walls_on_the_camera_side_only(kitchen_scene):
+    sim = WorldSim(kitchen_scene)
+    south = sim._cutaway_walls({"azimuth": 90, "elevation": -50})
+    southeast = sim._cutaway_walls({"azimuth": 135, "elevation": -45})
+    assert len(south) == 1 and len(southeast) == 2
+    assert sim._cutaway_walls({"azimuth": 90, "elevation": -89}) == []
+    groups = sim.model.geom_group.copy()
+    png = sim.render({"lookat": [0, 0, 0.5], "distance": 8, "azimuth": 90, "elevation": -50}, 160, 120)
+    assert png.startswith(b"\x89PNG")
+    assert (sim.model.geom_group == groups).all(), "rendering must restore the wall geoms"
+
+
 def test_render_from_worker_thread_is_served_by_main_thread_pump(kitchen_scene):
     sim = WorldSim(kitchen_scene)
     result: dict = {}

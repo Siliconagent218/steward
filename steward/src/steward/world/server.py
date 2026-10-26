@@ -164,6 +164,15 @@ class StewardHost:
             camera = q.get("camera", "overview")
             if camera.startswith("robot:"):
                 camera = sim.robot_camera_name(camera.removeprefix("robot:"))
+            elif camera == "free":
+                try:
+                    lookat = [float(v) for v in q["lookat"].split(",")]
+                    camera = {"lookat": lookat, "distance": float(q["distance"]), "azimuth": float(q["azimuth"]),
+                              "elevation": float(q["elevation"])}
+                except (KeyError, ValueError) as exc:
+                    raise HttpError(400, f"free camera needs lookat=x,y,z, distance, azimuth, elevation: {exc}") from None
+                if len(lookat) != 3 or camera["distance"] <= 0:
+                    raise HttpError(400, "free camera needs three lookat values and a positive distance")
             return Binary(sim.render(camera, int(q.get("width", 800)), int(q.get("height", 600))), "image/png")
 
         def console_page(q, b):

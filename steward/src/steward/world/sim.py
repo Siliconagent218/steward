@@ -30,6 +30,7 @@ from steward.scene.mjcf import MjcfBuild, build_mjcf
 from steward.scene.schema import Relation, RigidTree, SceneState, exact
 
 _COLLISION_GROUPS = np.array([1, 0, 0, 1, 0, 0], dtype=np.uint8)
+_HIDDEN_GROUP = 4  # not drawn by MuJoCo's default visualisation options
 
 
 @dataclass
@@ -50,9 +51,21 @@ class GraspConfig:
     capture_radius: float = 0.06
 
 
+def _free_camera(spec: dict) -> mujoco.MjvCamera:
+    """MuJoCo free camera: it looks along (cos el cos az, cos el sin az, sin el) at ``lookat``
+    from ``distance`` away; a negative elevation looks down."""
+    cam = mujoco.MjvCamera()
+    cam.type = mujoco.mjtCamera.mjCAMERA_FREE
+    cam.lookat[:] = [float(v) for v in spec["lookat"]]
+    cam.distance = float(spec["distance"])
+    cam.azimuth = float(spec["azimuth"])
+    cam.elevation = float(spec["elevation"])
+    return cam
+
+
 @dataclass
 class _RenderRequest:
-    camera: str
+    camera: str | dict
     width: int
     height: int
     done: threading.Event = field(default_factory=threading.Event)
@@ -432,8 +445,14 @@ class WorldSim:
         return False
 
     # --------------------------------------------------------------- rendering
-    def render(self, camera: str, width: int = 640, height: int = 480, timeout: float = 10.0) -> bytes:
-        """Render an RGB PNG from a named MuJoCo camera.
+    @property
+    def free_camera_fovy(self) -> float:
+        """Vertical field of view in degrees used by free-camera renders."""
+        return float(self.model.vis.global_.fovy)
+
+    def render(self, camera: str | dict, width: int = 640, height: int = 480, timeout: float = 10.0) -> bytes:
+        """Render an RGB PNG from a named MuJoCo camera, or from a free camera given as
+        ``{"lookat": [x, y, z], "distance": d, "azimuth": deg, "elevation": deg}``.
 
         OpenGL rendering must run on the main thread on macOS. Calls from other threads queue a
         request and wait for the main thread to serve it through :meth:`pump`; without a pumping
@@ -466,17 +485,49 @@ class WorldSim:
             except queue.Empty:
                 return
 
-    def _render_now(self, camera: str, width: int, height: int) -> bytes:
+    def _render_now(self, camera: str | dict, width: int, height: int) -> bytes:
         with self.lock:
             key = (width, height)
             if key not in self._renderers:
                 self._renderers[key] = mujoco.Renderer(self.model, height, width)
             renderer = self._renderers[key]
-            renderer.update_scene(self.data, camera=camera)
+            if isinstance(camera, dict):
+                hidden = self._cutaway_walls(camera)
+                saved = {gid: int(self.model.geom_group[gid]) for gid in hidden}
+                try:
+                    for gid in hidden:
+                        self.model.geom_group[gid] = _HIDDEN_GROUP
+                    renderer.update_scene(self.data, camera=_free_camera(camera))
+                finally:
+                    for gid, group in saved.items():
+                        self.model.geom_group[gid] = group
+            else:
+                renderer.update_scene(self.data, camera=camera)
             img = renderer.render()
         buf = io.BytesIO()
         Image.fromarray(img).save(buf, format="PNG")
         return buf.getvalue()
+
+    def _cutaway_walls(self, spec: dict) -> list[int]:
+        """Geoms of environment walls on the camera side of the room, hidden in free-camera views
+        so the camera looks into the room (rendering only; physics and robot cameras keep them)."""
+        az, el = math.radians(float(spec["azimuth"])), math.radians(float(spec["elevation"]))
+        if el < math.radians(-80):
+            return []
+        toward_camera = np.array([-math.cos(az), -math.sin(az)])
+        hidden = []
+        for ent in self.template.entities:
+            if ent.role != "environment":
+                continue
+            names = self.build.names[ent.id]
+            center = self.data.xpos[mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, names.bodies[ent.rigid.links[0].id])][:2]
+            for link in ent.rigid.links[1:]:
+                bid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, names.bodies[link.id])
+                offset = self.data.xpos[bid][:2] - center
+                norm = float(np.linalg.norm(offset))
+                if norm > 1e-6 and float(offset @ toward_camera) / norm > 0.35:
+                    hidden += [gid for gid in range(self.model.ngeom) if int(self.model.geom_bodyid[gid]) == bid]
+        return hidden
 
     def robot_camera_name(self, robot_id: str, sensor_id: str = "head_camera") -> str:
         return self.build.names[robot_id].cameras[sensor_id]

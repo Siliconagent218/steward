@@ -1297,10 +1297,10 @@ steward（fork 仓库根目录）
 | Observer | ES 与 World State 关联；召回率、误检、位置误差、类别准确率、NEES、自定位误差；JSONL 记录；泄漏检测 |
 | Ego Harness bundle | `ctx.ego` 服务定义与 HTTP 提供者；机器人工具 `ego_state`、`ego_query`、`ego_observe`、`ego_explore`、`ego_predict`、`skill_run`、`skill_status`、`body_stop`；安全守卫（`tools/pre-execute` 收据核验、`ctx.tools.guard` 最终否决、`/estop` 急停）；禁用继承自 `dsh-base` 的 shell、文件、网页、工作流、后台任务与工作目录工具，机器人只能经 `ctx.ego` 感知与行动 |
 | World Harness bundle | `ctx.world` 服务定义与 HTTP 提供者；工具 `world_status`、`world_scene`、`asset_search`、`asset_get`、`asset_create`、`asset_preview`、`asset_publish`、`scene_compose`、`scene_render`、`scenario_save`、`world_catalog`、`episode_control`、`world_clock`、`observer_report` |
-| Steward 控制台 | 浏览器页面 `http://127.0.0.1:7400/console`（由 WCA 端口提供，属于 Steward 平面）：俯视地图同时显示 World State 与机器人 ES（估计框、2σ 不确定度、Observer 关联线），总览与机器人头部相机画面，Observer 指标与误差曲线，抓放事件，暂停 / 继续 / 倍速 / 重置 / 切换 Scenario |
+| Steward 控制台 | 浏览器页面 `http://127.0.0.1:7400/console`（由 WCA 端口提供，属于 Steward 平面）。主视图为斜上方视角的实时渲染：MuJoCo 自由相机渲染 World State，靠近相机一侧的墙体自动剖切（只影响渲染），机器人 ES 以三维线框、2σ 不确定度圈、自我位姿和 Observer 关联线按同一相机投影叠加；可拖动旋转、滚轮缩放，预设斜上方南 / 东南 / 西南与正上方视角。右栏为机器人头部相机、俯视地图（World State 与 ES）、Observer 指标与误差曲线、抓放事件；顶栏可暂停 / 继续 / 倍速 / 重置 / 切换 Scenario |
 | 主线程渲染 | macOS 上 OpenGL 必须在主线程运行：相机渲染、资产预览、Episode 加载与重置都由请求线程排队、主线程执行；没有主线程服务时请求超时而不阻塞物理 |
 | Episode 切换 | ER 检测到世界时钟倒退即视为重新开机，清空 ES、收据并取消正在执行的技能 |
-| 检查与工具 | pytest 28 项；DSH 单元测试与跨语言集成测试 5 项；三个 profile 的组合配置快照比对；多随机种子回归脚本；命令行 `steward build-kitchen / world / ego / up / demo`；运行脚本 `run-ego.sh`、`run-world.sh` |
+| 检查与工具 | pytest 29 项；DSH 单元测试与跨语言集成测试 5 项；三个 profile 的组合配置快照比对；多随机种子回归脚本；命令行 `steward build-kitchen / world / ego / up / demo`；运行脚本 `run-ego.sh`、`run-world.sh` |
 
 ### 13.3 实际布局
 
