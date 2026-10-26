@@ -1,0 +1,26 @@
+{
+  "name": "@steward/dsh-workspace",
+  "private": true,
+  "type": "module",
+  "description": "Steward DeepSeek Harness plugins: Ego Harness and World Harness bundles.",
+  "scripts": {
+    "build": "tsc -b",
+    "clean": "tsc -b --clean",
+    "test": "tsc -b && node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.0.5",
+    "@deepseek-ai/dsh": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-tools": "0.2.1-rc.3",
+    "@deepseek-ai/schemastery": "3.18.5",
+    "@steward/dsh-ego-runtime-client": "workspace:*",
+    "@steward/dsh-robot-safety": "workspace:*",
+    "@steward/dsh-tool-ego": "workspace:*",
+    "@steward/dsh-tool-world": "workspace:*",
+    "@types/node": "^24.0.0",
+    "typescript": "^6.0.3"
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  }
+}

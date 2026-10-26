@@ -1,0 +1,23 @@
+{
+  "name": "@steward/dsh-ego-runtime-client",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Service Provider of ctx.ego over the robot's Ego API (HTTP).",
+  "type": "module",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
+  "exports": { ".": { "types": "./lib/index.d.ts", "default": "./lib/index.js" } },
+  "files": ["lib"],
+  "dependencies": {
+    "@steward/dsh-ego": "workspace:*",
+    "@steward/http-json": "workspace:*"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.5",
+    "@deepseek-ai/schemastery": "^3.18.5"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.0.5",
+    "@deepseek-ai/schemastery": "3.18.5"
+  }
+}

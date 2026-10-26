@@ -1,0 +1,11 @@
+{
+  "name": "@steward/http-json",
+  "version": "0.0.1",
+  "private": true,
+  "description": "JSON-over-HTTP requests with caller cancellation and a deadline; no DeepSeek Harness dependency.",
+  "type": "module",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
+  "exports": { ".": { "types": "./lib/index.d.ts", "default": "./lib/index.js" } },
+  "files": ["lib"]
+}

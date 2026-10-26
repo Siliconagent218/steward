@@ -1,0 +1,13 @@
+{
+  "name": "@steward/dsh-ego",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Service Definition for the robot Ego capability (ctx.ego): read the Ego-State, request ESim predictions, run predicted skills.",
+  "type": "module",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
+  "exports": { ".": { "types": "./lib/index.d.ts", "default": "./lib/index.js" } },
+  "files": ["lib"],
+  "peerDependencies": { "@deepseek-ai/cordis": "^4.0.5" },
+  "devDependencies": { "@deepseek-ai/cordis": "4.0.5" }
+}

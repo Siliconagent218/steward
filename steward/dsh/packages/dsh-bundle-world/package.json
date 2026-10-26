@@ -1,0 +1,14 @@
+{
+  "name": "@steward/dsh-bundle-world",
+  "version": "0.0.1",
+  "private": true,
+  "description": "World Harness bundle: ctx.world over the Steward World Control API and the world-building tools.",
+  "type": "module",
+  "files": ["cordis.patch.yml"],
+  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } },
+  "engines": { "dsh": ">=0.2.1-rc.3 <0.3.0" },
+  "dependencies": {
+    "@steward/dsh-tool-world": "workspace:*",
+    "@steward/dsh-world-client": "workspace:*"
+  }
+}

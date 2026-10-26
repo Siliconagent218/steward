@@ -1,0 +1,90 @@
+/**
+ * Service Provider of `ctx.ego` that calls the robot-local Ego API of a Steward Ego Runtime.
+ * @module @steward/dsh-ego-runtime-client
+ */
+
+import type { Context } from '@deepseek-ai/cordis'
+import z from '@deepseek-ai/schemastery'
+import { EgoError, EgoService } from '@steward/dsh-ego'
+import type { EgoQuery, EgoSkill, JsonObject, PredictionReceipt, SkillJob } from '@steward/dsh-ego'
+import { baseUrl, HttpJsonError, requestJson } from '@steward/http-json'
+
+/** Validated plugin configuration. */
+export interface Config {
+  /** Base URL of the robot's Ego API. */
+  endpoint: string
+  /** Deadline for ordinary requests in milliseconds. */
+  timeoutMs: number
+}
+
+/** `ctx.ego` provider backed by HTTP calls to the Ego API. */
+export class EgoRuntimeClient extends EgoService {
+  static Config = z.object({
+    endpoint: z.string().default('http://127.0.0.1:7420'),
+    timeoutMs: z.number().min(100).default(15_000),
+  })
+
+  private readonly base: string
+
+  constructor(ctx: Context, readonly config: Config) {
+    super(ctx)
+    this.base = baseUrl(config.endpoint)
+  }
+
+  private async call<T>(method: 'GET' | 'POST', path: string, body?: unknown, signal?: AbortSignal,
+    timeoutMs = this.config.timeoutMs): Promise<T> {
+    try {
+      return await requestJson<T>(this.base, method, path, body, { signal, timeoutMs })
+    } catch (error) {
+      if (error instanceof HttpJsonError) throw new EgoError(error.message, error.status)
+      throw error
+    }
+  }
+
+  summary(signal?: AbortSignal): Promise<JsonObject> {
+    return this.call('GET', '/ego/summary', undefined, signal)
+  }
+
+  async query(query: EgoQuery, signal?: AbortSignal): Promise<JsonObject[]> {
+    const params = new URLSearchParams()
+    if (query.category) params.set('category', query.category)
+    if (query.near) params.set('near', query.near)
+    if (query.radius !== undefined) params.set('radius', String(query.radius))
+    const result = await this.call<{ objects: JsonObject[] }>('GET', `/ego/query?${params}`, undefined, signal)
+    return result.objects
+  }
+
+  observe(signal?: AbortSignal): Promise<JsonObject> {
+    return this.call('POST', '/ego/observe', {}, signal)
+  }
+
+  explore(signal?: AbortSignal): Promise<SkillJob> {
+    return this.call('POST', '/ego/explore', {}, signal)
+  }
+
+  predict(skill: EgoSkill, params: JsonObject, signal?: AbortSignal): Promise<PredictionReceipt> {
+    return this.call('POST', '/ego/predict', { skill, params }, signal)
+  }
+
+  receipt(id: string, signal?: AbortSignal): Promise<PredictionReceipt> {
+    return this.call('GET', `/ego/receipt?id=${encodeURIComponent(id)}`, undefined, signal)
+  }
+
+  run(receiptId: string, signal?: AbortSignal): Promise<SkillJob> {
+    return this.call('POST', '/skill/run', { receipt: receiptId }, signal)
+  }
+
+  job(jobId: string, signal?: AbortSignal): Promise<SkillJob> {
+    return this.call('GET', `/skill/status?job=${encodeURIComponent(jobId)}`, undefined, signal)
+  }
+
+  wait(jobId: string, timeoutS: number, signal?: AbortSignal): Promise<SkillJob> {
+    return this.call('POST', '/skill/wait', { job: jobId, timeoutS }, signal, timeoutS * 1000 + this.config.timeoutMs)
+  }
+
+  stop(signal?: AbortSignal): Promise<JsonObject> {
+    return this.call('POST', '/skill/stop', {}, signal)
+  }
+}
+
+export default EgoRuntimeClient

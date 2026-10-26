@@ -1,0 +1,13 @@
+{
+  "name": "@steward/dsh-world",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Service Definition of the World capability (ctx.world): World State, episodes, clock and asset/scene authoring for the World Harness.",
+  "type": "module",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
+  "exports": { ".": { "types": "./lib/index.d.ts", "default": "./lib/index.js" } },
+  "files": ["lib"],
+  "peerDependencies": { "@deepseek-ai/cordis": "^4.0.5" },
+  "devDependencies": { "@deepseek-ai/cordis": "4.0.5" }
+}

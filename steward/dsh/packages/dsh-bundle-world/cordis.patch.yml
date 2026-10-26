@@ -1,0 +1,11 @@
+# World Harness layer. Override `steward-world-api.config.endpoint` in the world profile's
+# cordis.patch.yml when the World Control API is not on the default port.
+- insert:
+    - id: steward-world-api
+      name: '@steward/dsh-world-client'
+      config:
+        endpoint: 'http://127.0.0.1:7400'
+        timeoutMs: 15000
+        slowTimeoutMs: 120000
+    - id: steward-tool-world
+      name: '@steward/dsh-tool-world'

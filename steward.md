@@ -251,6 +251,7 @@ interface RigidTree<M extends Mode> {
   root: Est<'fixed' | 'planar' | 'free'>   // 根部件与世界的连接：固定 / 地面平面运动 3-DoF / 自由 6-DoF
   links: Link<M>[]                 // links[0] 为根部件
   joints: Joint<M>[]               // 树结构：每个非根 Link 恰有一个父 Joint
+  rootActuator?: RootActuator      // 根部件的驱动：移动底盘驱动 planar 根的 x、y、yaw
 }
 
 interface Link<M extends Mode> {
@@ -304,7 +305,7 @@ interface Relation<M extends Mode> {
 interface Sensor {                 // 机器人部件上的传感器
   id: SensorId
   kind: 'rgb' | 'depth' | 'rgbd' | 'imu' | 'force-torque' | 'tactile' | 'encoder'
-  mount: Pose                      // 相对所在部件
+  mount: Pose                      // 相对所在部件；光轴为 mount 坐标系 +x，+z 朝上
   intrinsics?: CameraIntrinsics
   rateHz: number
 }
@@ -313,6 +314,13 @@ interface Actuator {               // 关节执行器
   kind: 'position' | 'velocity' | 'torque'
   limits: { effort: number; velocity: number }
   gear?: number
+  gains?: { kp?: number; kv?: number; armature?: number }   // 仿真控制增益，实体机器人由驱动器自行整定
+}
+
+interface RootActuator {           // planar 根的三个自由度各一组参数，顺序为 x、y、yaw
+  kind: 'position'
+  limits: { effort: number[]; velocity: number[] }
+  gains: { kp: number[]; damping: number[] }
 }
 ```
 
@@ -1177,7 +1185,7 @@ Observer 只读取 GT、扰动事件与遥测通道数据，结果写入 Recorde
 
 ## 9. 仓库与包结构
 
-Steward 位于 fork 仓库中，只新增文件：
+Steward 位于 fork 仓库中，只新增文件。下面是目标结构；Phase 0 已实现部分的实际布局见 11.1。
 
 ```
 steward（fork 仓库根目录）
@@ -1246,6 +1254,83 @@ steward（fork 仓库根目录）
 | Phase 3 | 精细操作 Skill（VLA / MPC）；长时任务（做一顿早餐）在扰动下运行 | 多子目标任务在设定扰动强度下的完成率达到阈值 |
 | Phase 4 | 多机器人与显式通信 | 两台机器人协作完成任务且无信息泄漏 |
 | Phase 5 | 实体机器人：Real HAL、标定、动作捕捉近似 GT | 同一 EH bundle 无代码修改在实机上完成 Phase 3 任务 |
+
+### 11.1 Phase 0 实现说明
+
+#### 实际布局
+
+```
+steward/
+├── pyproject.toml                   # Python 包 steward（MuJoCo、numpy、Pillow）
+├── src/steward/
+│   ├── scene/                       # SceneState 数据结构、validate_world / validate_ego、SceneState → MJCF、包围盒
+│   ├── assets/                      # 资产生成器、物理校验、预览渲染、内容寻址资产库
+│   ├── authoring/                   # 资产创建与发布、场景组合与检查、Scenario、默认厨房
+│   ├── world/                       # WSim（物理、理想抓取、理想检测器）、Steward 主机（WCA 与机器人端口）
+│   ├── ego/                         # ER：估计器、规划器、ESim、技能执行、Ego API
+│   ├── observer/                    # Observer：ES 与 GT 对比、NEES、JSONL 记录
+│   ├── mission.py                   # 只经 Ego API 的脚本化任务「把杯子放到桌上」
+│   └── cli.py                       # steward build-kitchen / world / ego / up / demo
+├── tests/                           # pytest：数据结构、资产、ES 收敛、ESim 把关、端到端任务、端口隔离
+├── dsh/                             # Steward 的独立 pnpm 工作区（仅此目录依赖 @deepseek-ai/*）
+│   ├── packages/
+│   │   ├── http-json/               # 零 DSH 依赖的 JSON 请求工具
+│   │   ├── dsh-ego/                 # ctx.ego：Service Definition
+│   │   ├── dsh-ego-runtime-client/  # ctx.ego：经 Ego API 的 Service Provider
+│   │   ├── dsh-tool-ego/            # 机器人工具（ego_state、ego_predict、skill_run…）
+│   │   ├── dsh-robot-safety/        # 收据核验、最终否决、/estop
+│   │   ├── dsh-bundle-ego/          # EH bundle
+│   │   ├── dsh-world/               # ctx.world：Service Definition
+│   │   ├── dsh-world-client/        # ctx.world：经 WCA 的 Service Provider
+│   │   ├── dsh-tool-world/          # 世界构建工具（asset_create、scene_compose、episode_control…）
+│   │   └── dsh-bundle-world/        # WH bundle
+│   └── test/                        # 工具与守卫单元测试；跨语言集成测试（无语言模型）
+├── scripts/
+│   ├── setup-dsh-profiles.sh        # 在 var/dsh 下创建 ego 与 world 两个独立 DSH_HOME 与 profile
+│   ├── check.sh                     # Python 测试 + DSH 编译与测试 + 组合配置快照比对
+│   └── seed_sweep.py                # 多随机种子运行端到端任务并显示进度
+└── compat/snapshots/                # ego 与 world profile 的组合配置快照
+```
+
+#### 运行方式
+
+```sh
+cd steward
+uv sync                                       # 或使用已有的 .venv
+.venv/bin/steward demo                        # 构建厨房（首次）并运行脚本化任务，按 World State 判定成败
+.venv/bin/steward up                          # 常驻：WCA :7400，机器人端口 :7410，Ego API :7420
+./scripts/setup-dsh-profiles.sh               # 构建 DSH 插件并创建 ego / world profile
+DSH_HOME=var/dsh/robot-1 dsh/node_modules/.bin/dsh --profile ego "把杯子放到桌上"   # 需要 DEEPSEEK_API_KEY
+DSH_HOME=var/dsh/world dsh/node_modules/.bin/dsh --profile world --port 3091        # WH 浏览器界面
+./scripts/check.sh                            # 全部检查
+```
+
+EH profile 默认从上游 `headless` 模板派生，WH profile 从上游 `web` 模板派生。DSH 运行时是 npm 上锁定的 `@deepseek-ai/dsh@0.2.1-rc.3`，安装在 `steward/dsh/node_modules`，不使用 fork 中的上游源码构建。
+
+#### 已验证
+
+| 验收项 | 证据 |
+|---|---|
+| 资产构建与校验 | 7 类厨房资产与 Phase 0 机器人全部通过编译、质量、跌落、倾倒与穿透检查；场景组合拒绝相互穿透的摆放 |
+| 把杯子放到桌上 | `steward demo`、pytest 端到端测试、DSH 跨语言集成测试三条路径均由 World State 确认杯子位于桌上；`scripts/seed_sweep.py` 20 个随机种子 20/20 通过 |
+| ESim 把关 | 远处观测时杯子位置不确定度约 3 厘米，抓取风险超限被拒；靠近观察后降到约 0.7 厘米，风险降到 0.0001 后执行 |
+| ES 收敛与校准 | Observer：平均位置误差约 6 厘米降至约 1.3 厘米，NEES 约 2–2.5（三维理论值 3），无泄漏 |
+| 信息隔离 | `validate_ego` 检测 `w:` 标识；机器人端口不提供 WCA 路由，传感器帧不含 World State 标识 |
+| DSH 加载 | `--dump-config` 显示 `dsh-base → dsh-headless → @steward/dsh-bundle-ego`；非法端点在加载时被拒并指明配置行；WH Web 界面正常启动 |
+
+#### 与设计的偏差（Phase 0 简化，后续阶段替换）
+
+| 设计 | Phase 0 实现 | 计划 |
+|---|---|---|
+| `scene-schema` 以 Protobuf 为权威定义，通道用 gRPC | Python dataclass 为权威定义，所有通道为 JSON over HTTP；TypeScript 侧只处理工具所需的摘要 | Phase 1 引入 Protobuf 并生成多语言代码 |
+| 感知链路：渲染 → 检测 → 估计 | 理想检测器：直接输出可见物体的类别与带噪声的有向包围盒（含 3% 杯/碗混淆），不含 World State 标识 | Phase 1 |
+| 精细抓取 | 理想抓取：夹爪闭合时 5–6 厘米捕获半径内的物体被刚性附着；机械臂与夹爪为纯可视部件，不推动物体 | Phase 3 |
+| ESim 物理推演与信念采样 | 几何与概率评估：路径与足迹碰撞检查、由位置不确定度计算抓空概率；收据携带计划，执行即执行该计划 | Phase 2 |
+| 机器人 `map` 坐标系与世界坐标系不同 | 里程计近似理想，`map` 与 `world` 重合 | Phase 1 引入定位误差与配准 |
+| 扰动、触发器、扰动策略守卫 | 未实现 | Phase 2 |
+| WH 经 SDK 向机器人派发任务（`task_dispatch`） | 未实现；实验员直接向 EH 下达任务 | Phase 2 |
+| EH 工具返回相机图像 | `ego_observe` 只返回文字结果与图像文件路径；WH 预览图通过上游文件读取工具查看 | Phase 1 接入附件服务 |
+| EH 能力集评审 | EH 继承 `dsh-base` 的通用工具（shell、文件、网页等），已纳入组合配置快照，尚未决定禁用哪些 | Phase 1 前评审 |
 
 ## 12. 待决问题
 

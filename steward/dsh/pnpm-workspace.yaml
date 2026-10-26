@@ -1,0 +1,12 @@
+packages:
+  - packages/*
+
+# Same decisions as the upstream workspace: native terminal and FFI packages build; the
+# subprocess provider restores node-pty's macOS spawn-helper permission; optional LLM SDK
+# postinstalls stay disabled.
+allowBuilds:
+  node-pty: true
+  koffi: true
+  '@deepseek-ai/dsh-subprocess-local': true
+  '@google/genai': false
+  protobufjs: false

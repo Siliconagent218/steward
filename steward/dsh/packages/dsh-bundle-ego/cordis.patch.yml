@@ -1,0 +1,14 @@
+# Ego Harness layer. Override `steward-ego-runtime.config.endpoint` in the robot profile's
+# cordis.patch.yml when the Ego API is not on the default port (one profile per robot).
+- insert:
+    - id: steward-ego-runtime
+      name: '@steward/dsh-ego-runtime-client'
+      config:
+        endpoint: 'http://127.0.0.1:7420'
+        timeoutMs: 15000
+    - id: steward-tool-ego
+      name: '@steward/dsh-tool-ego'
+    - id: steward-robot-safety
+      name: '@steward/dsh-robot-safety'
+      config:
+        maxRisk: 0.35
