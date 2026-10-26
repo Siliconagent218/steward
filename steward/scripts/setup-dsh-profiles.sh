@@ -22,3 +22,4 @@ setup_profile() {
 
 setup_profile "$VAR/robot-1" ego "$ROBOT_TEMPLATE" dsh-bundle-ego
 setup_profile "$VAR/world" world web dsh-bundle-world
+setup_profile "$VAR/world" world-task headless dsh-bundle-world

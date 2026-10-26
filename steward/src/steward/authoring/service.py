@@ -149,10 +149,18 @@ class AuthoringService:
 
     def render_scene_views(self, scene_name: str) -> list[str]:
         scene = SceneState.from_dict(self.load_scene(scene_name))
-        span = 6.0
+        width, depth, cx, cy = 6.0, 5.0, 0.0, 0.0
+        for ent in scene.entities:
+            if ent.category.value == "building":
+                floor = ent.rigid.links[0].geometry["collision"][0]["size"]
+                width, depth = floor[0], floor[1]
+                cx, cy = ent.pose.value["p"][0], ent.pose.value["p"][1]
+        span = max(width, depth)
         cams = [
-            {"name": "preview_overview", "pos": [0.0, -span * 0.42, span * 1.05], "target": [0, 0.15, 0], "fovy": 60},
-            {"name": "preview_corner", "pos": [span * 0.45, -span * 0.4, 2.2], "target": [0, 0.5, 0.6], "fovy": 70},
+            {"name": "preview_overview", "pos": [cx, cy - depth * 0.35, span * 1.1], "target": [cx, cy + depth * 0.05, 0.0],
+             "fovy": 60},
+            {"name": "preview_corner", "pos": [cx + width / 2 - 0.3, cy - depth / 2 + 0.3, 2.0],
+             "target": [cx - width * 0.15, cy + depth * 0.15, 0.6], "fovy": 75},
         ]
         return [str(p) for p in render_scene(scene, cams, self.root / "previews", f"scene-{scene_name}")]
 

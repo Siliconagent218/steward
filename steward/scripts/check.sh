@@ -20,12 +20,12 @@ echo "== dsh plugins"
 (cd "$STEWARD/dsh" && pnpm run build && node --test test/*.test.mjs)
 
 echo "== composed configuration"
-if [ ! -d "$VAR/robot-1/profiles/ego" ] || [ ! -d "$VAR/world/profiles/world" ]; then
+if [ ! -d "$VAR/robot-1/profiles/ego" ] || [ ! -d "$VAR/world/profiles/world" ] || [ ! -d "$VAR/world/profiles/world-task" ]; then
   "$STEWARD/scripts/setup-dsh-profiles.sh"
 fi
 mkdir -p "$SNAPSHOTS"
 status=0
-for pair in "robot-1:ego" "world:world"; do
+for pair in "robot-1:ego" "world:world" "world:world-task"; do
   home="${pair%%:*}"
   profile="${pair##*:}"
   current="$(mktemp)"

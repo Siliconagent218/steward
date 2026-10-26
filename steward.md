@@ -1273,11 +1273,11 @@ steward（fork 仓库根目录）
 
 ### 13.1 当前阶段
 
-截至 2026-10-26，**Phase 0 已实现**，脚本化验收全部通过。Phase 0 验收中由语言模型驱动的两项（机器人智能体自主完成任务、WH 从文字描述生成厨房）的工具与 profile 已就绪，待配置 `DEEPSEEK_API_KEY` 后运行。
+截至 2026-10-26，**Phase 0 已完成**，验收全部通过，包括由 DeepSeek 模型驱动的两项：WH 根据文字描述构建并校验了一间新厨房（`llm-kitchen`），机器人智能体在默认厨房和这间新厨房里都自主把杯子放到了桌上，由 World State 确认。
 
 | 阶段 | 状态 | 说明 |
 |---|---|---|
-| Phase 0 | 已实现 | 世界仿真、资产与场景构建、单机器人理想感知、ES 估计、简化 ESim、技能执行、Observer、EH 与 WH 两个 DSH bundle |
+| Phase 0 | 已完成 | 世界仿真、资产与场景构建、单机器人理想感知、ES 估计、简化 ESim、技能执行、Observer、EH 与 WH 两个 DSH bundle；模型驱动验收通过 |
 | Phase 1 | 未开始 | 真实感知链路、定位误差、Protobuf 协议、EH 工具返回图像 |
 | Phase 2 | 未开始 | ESim 物理推演、扰动与触发器、WH 向机器人派发任务 |
 | Phase 3 | 未开始 | 精细操作技能、长时任务 |
@@ -1295,9 +1295,11 @@ steward（fork 仓库根目录）
 | Steward 主机 | 世界控制接口 WCA（状态、World State、时钟、Episode、渲染、Observer 报告、资产 / 场景 / Scenario 编写）；每个机器人一个独立端口，只提供传感器、相机、执行器命令与单向遥测 |
 | Ego Runtime | 检测融合为 ES（机器人自分配 `e:` id、卡尔曼位置融合、类别分布、存在概率、重复轨迹合并、支撑与附着关系）；基于 ES 的二维路径规划与停靠足迹检查；简化 ESim 与 Prediction Receipt；导航、抓取、放置、环顾技能；Ego API；运行端再次核验收据 |
 | Observer | ES 与 World State 关联；召回率、误检、位置误差、类别准确率、NEES、自定位误差；JSONL 记录；泄漏检测 |
-| Ego Harness bundle | `ctx.ego` 服务定义与 HTTP 提供者；机器人工具 `ego_state`、`ego_query`、`ego_observe`、`ego_explore`、`ego_predict`、`skill_run`、`skill_status`、`body_stop`；安全守卫（`tools/pre-execute` 收据核验、`ctx.tools.guard` 最终否决、`/estop` 急停） |
+| Ego Harness bundle | `ctx.ego` 服务定义与 HTTP 提供者；机器人工具 `ego_state`、`ego_query`、`ego_observe`、`ego_explore`、`ego_predict`、`skill_run`、`skill_status`、`body_stop`；安全守卫（`tools/pre-execute` 收据核验、`ctx.tools.guard` 最终否决、`/estop` 急停）；禁用继承自 `dsh-base` 的 shell、文件、网页、工作流、后台任务与工作目录工具，机器人只能经 `ctx.ego` 感知与行动 |
 | World Harness bundle | `ctx.world` 服务定义与 HTTP 提供者；工具 `world_status`、`world_scene`、`asset_search`、`asset_get`、`asset_create`、`asset_preview`、`asset_publish`、`scene_compose`、`scene_render`、`scenario_save`、`world_catalog`、`episode_control`、`world_clock`、`observer_report` |
-| 检查与工具 | pytest 23 项；DSH 单元测试与跨语言集成测试 5 项；组合配置快照比对；多随机种子回归脚本；命令行 `steward build-kitchen / world / ego / up / demo` |
+| 主线程渲染 | macOS 上 OpenGL 必须在主线程运行：相机渲染、资产预览、Episode 加载与重置都由请求线程排队、主线程执行；没有主线程服务时请求超时而不阻塞物理 |
+| Episode 切换 | ER 检测到世界时钟倒退即视为重新开机，清空 ES、收据并取消正在执行的技能 |
+| 检查与工具 | pytest 27 项；DSH 单元测试与跨语言集成测试 5 项；三个 profile 的组合配置快照比对；多随机种子回归脚本；命令行 `steward build-kitchen / world / ego / up / demo`；运行脚本 `run-ego.sh`、`run-world.sh` |
 
 ### 13.3 实际布局
 
@@ -1328,7 +1330,9 @@ steward/
 │   │   └── dsh-bundle-world/        # WH bundle
 │   └── test/                        # 工具与守卫单元测试；跨语言集成测试（无语言模型）
 ├── scripts/
-│   ├── setup-dsh-profiles.sh        # 在 var/dsh 下创建 ego 与 world 两个独立 DSH_HOME 与 profile
+│   ├── setup-dsh-profiles.sh        # 在 var/dsh 下创建 ego、world、world-task 三个 profile（两个独立 DSH_HOME）
+│   ├── run-ego.sh                   # 加载 .env，在机器人的空工作目录里运行 EH
+│   ├── run-world.sh                 # 加载 .env，运行 WH（浏览器界面或一次性任务）
 │   ├── check.sh                     # Python 测试 + DSH 编译与测试 + 组合配置快照比对
 │   └── seed_sweep.py                # 多随机种子运行端到端任务并显示进度
 └── compat/snapshots/                # ego 与 world profile 的组合配置快照
@@ -1355,14 +1359,23 @@ uv sync
 .venv/bin/steward world --wca-port 7400 --robot-port 7410
 .venv/bin/steward ego --robot-url http://127.0.0.1:7410 --api-port 7420
 
-# 构建 DSH 插件，在 var/dsh 下创建 ego（机器人）与 world（世界）两个独立 DSH_HOME
+# 加载指定 Scenario（例如 WH 生成的 llm-kitchen）
+.venv/bin/steward up --scenario llm-kitchen
+
+# 构建 DSH 插件，创建 ego（机器人）、world 与 world-task（世界）三个 profile
 ./scripts/setup-dsh-profiles.sh
 
-# 由语言模型驱动机器人（需要 DEEPSEEK_API_KEY，并先运行 steward up）
-DSH_HOME=var/dsh/robot-1 dsh/node_modules/.bin/dsh --profile ego "把杯子放到桌上"
+# 模型 key：写入 steward/.env（已被 Git 忽略），运行脚本会自动加载
+echo 'DEEPSEEK_API_KEY=sk-...' > .env
 
-# 打开 World Harness 浏览器界面（需要 DEEPSEEK_API_KEY，并先运行 steward up 或 steward world）
-DSH_HOME=var/dsh/world dsh/node_modules/.bin/dsh --profile world --port 3091
+# 由语言模型驱动机器人（先运行 steward up）；在 var/dsh/robot-1/workspace 空目录里运行
+./scripts/run-ego.sh "你是一台家用机器人。请把杯子放到桌上。"
+
+# World Harness 一次性任务：按文字描述构建资产、场景与 Scenario（先运行 steward up 或 steward world）
+./scripts/run-world.sh "构建一间 4 米 x 3.5 米的小厨房……场景命名 llm-kitchen，并保存同名 scenario"
+
+# World Harness 浏览器界面
+./scripts/run-world.sh --port 3091
 
 # 全部检查：Python 测试、DSH 编译与测试、组合配置快照比对
 ./scripts/check.sh
@@ -1372,7 +1385,7 @@ UPDATE_SNAPSHOTS=1 ./scripts/check.sh      # 评审后接受新的组合配置
 .venv/bin/python scripts/seed_sweep.py --seeds 20
 ```
 
-EH profile 默认从上游 `headless` 模板派生（设置 `ROBOT_TEMPLATE=web` 可改为浏览器界面），WH profile 从上游 `web` 模板派生。DSH 运行时是 npm 上锁定的 `@deepseek-ai/dsh@0.2.1-rc.3`，安装在 `steward/dsh/node_modules`，不使用 fork 中的上游源码构建。
+EH profile 默认从上游 `headless` 模板派生（设置 `ROBOT_TEMPLATE=web` 可改为浏览器界面）；WH 的 `world` profile 从上游 `web` 模板派生，`world-task` 从 `headless` 模板派生，两者共用世界的 `DSH_HOME`。DSH 运行时是 npm 上锁定的 `@deepseek-ai/dsh@0.2.1-rc.3`，安装在 `steward/dsh/node_modules`，不使用 fork 中的上游源码构建。
 
 ### 13.5 已验证
 
@@ -1384,6 +1397,9 @@ EH profile 默认从上游 `headless` 模板派生（设置 `ROBOT_TEMPLATE=web`
 | ES 收敛与校准 | Observer：平均位置误差约 6 厘米降至约 1.3 厘米，NEES 约 2–2.5（三维理论值 3），无泄漏 |
 | 信息隔离 | `validate_ego` 检测 `w:` 标识；机器人端口不提供 WCA 路由，传感器帧不含 World State 标识 |
 | DSH 加载 | `--dump-config` 显示 `dsh-base → dsh-headless → @steward/dsh-bundle-ego`；非法端点在加载时被拒并指明配置行；WH Web 界面正常启动 |
+| 模型驱动：机器人 | DeepSeek 模型经 `run-ego.sh` 在默认厨房与 WH 生成的 `llm-kitchen` 中都自主完成「把杯子放到桌上」（环顾 → 预测 → 靠近 → 抓取 → 放置 → 自查），World State 确认；Observer 平均位置误差 0.5–1.0 厘米，无泄漏；运行中未调用任何 shell 或文件工具 |
+| 模型驱动：WH | DeepSeek 模型经 `run-world.sh` 根据文字描述新建并发布 3 个资产（房间、操作台、小餐桌），全部通过物理校验；复用杯、碗、盘与机器人组合出 `llm-kitchen` 场景并保存同名 Scenario；该 Scenario 可经 WCA 加载 |
+| 能力边界 | EH 的组合配置中 `tool-bash`、`tool-pwsh`、`tool-jobs`、`tool-fs`、`tool-fs-search`、`tool-web`、`tool-workflow`、`tool-working-directory` 均为禁用，变化纳入快照比对 |
 
 ### 13.6 与设计的偏差
 
@@ -1399,4 +1415,4 @@ EH profile 默认从上游 `headless` 模板派生（设置 `ROBOT_TEMPLATE=web`
 | 扰动、触发器、扰动策略守卫 | 未实现 | Phase 2 |
 | WH 经 SDK 向机器人派发任务（`task_dispatch`） | 未实现；实验员直接向 EH 下达任务 | Phase 2 |
 | EH 工具返回相机图像 | `ego_observe` 只返回文字结果与图像文件路径；WH 预览图通过上游文件读取工具查看 | Phase 1 接入附件服务 |
-| EH 能力集评审 | EH 继承 `dsh-base` 的通用工具（shell、文件、网页等），已纳入组合配置快照，尚未决定禁用哪些 | Phase 1 前评审 |
+| WH 能力边界 | WH 保留 `dsh-base` 的通用工具（shell、文件等），可读取预览图，也能自行启动进程；验收中它曾自行启动一个世界进程来验证新场景 | Phase 1 评审是否限制 WH 的 shell，或提供专用的场景验证工具 |

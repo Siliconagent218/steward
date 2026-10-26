@@ -95,8 +95,11 @@
     openAt: never
 - id: working-directory
   name: '@deepseek-ai/dsh-working-directory'
+# == @deepseek-ai/dsh-base, patched by @steward/dsh-bundle-ego
 - id: tool-working-directory
   name: '@deepseek-ai/dsh-tool-working-directory'
+  disabled: true
+# == @deepseek-ai/dsh-base
 - id: session-projection
   name: '@deepseek-ai/dsh-session-projection'
 - id: storage
@@ -171,22 +174,29 @@
         approval: never
 - id: shell-env
   name: '@deepseek-ai/dsh-shell-env'
+# == @deepseek-ai/dsh-base, patched by @steward/dsh-bundle-ego
 - id: tool-bash
   name: '@deepseek-ai/dsh-tool-bash'
-  disabled: !!js process.platform === 'win32'
+  disabled: true
 - id: tool-pwsh
   name: '@deepseek-ai/dsh-tool-pwsh'
-  disabled: !!js process.platform !== 'win32'
+  disabled: true
 - id: tool-jobs
   name: '@deepseek-ai/dsh-tool-jobs'
+  disabled: true
+# == @deepseek-ai/dsh-base
 - id: fs-observation-policy
   name: '@deepseek-ai/dsh-fs-observation-policy'
+# == @deepseek-ai/dsh-base, patched by @steward/dsh-bundle-ego
 - id: tool-fs
   name: '@deepseek-ai/dsh-tool-fs'
+  disabled: true
 - id: tool-fs-search
   name: '@deepseek-ai/dsh-tool-fs-search'
   config:
     sampleOverCapGlobResults: false
+  disabled: true
+# == @deepseek-ai/dsh-base
 - id: agent-instructions
   name: '@deepseek-ai/dsh-agent-instructions'
   config:
@@ -293,8 +303,11 @@
   name: '@deepseek-ai/dsh-workflow-ptc'
   config:
     provider: spawn
+# == @deepseek-ai/dsh-base, patched by @steward/dsh-bundle-ego
 - id: tool-workflow
   name: '@deepseek-ai/dsh-tool-workflow'
+  disabled: true
+# == @deepseek-ai/dsh-base
 - id: timeout-policy
   name: '@deepseek-ai/dsh-tool-call-timeout-policy'
 - id: spill-local
@@ -342,11 +355,14 @@
     apiKeyEnv: DEEPSEEK_API_KEY
 - id: web-fetch-http
   name: '@deepseek-ai/dsh-web-fetch-http'
+# == @deepseek-ai/dsh-base, patched by @steward/dsh-bundle-ego
 - id: tool-web
   name: '@deepseek-ai/dsh-tool-web'
   config:
     fetch: true
     searchTimeoutMs: 60000
+  disabled: true
+# == @deepseek-ai/dsh-base
 - id: mcp-resources
   name: '@deepseek-ai/dsh-mcp-resources'
 # == @deepseek-ai/dsh-base, patched by @deepseek-ai/dsh-headless

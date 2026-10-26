@@ -83,6 +83,10 @@ class SkillExecutor:
         threading.Thread(target=self._run, args=(job, skill, receipt), name=f"skill-{job.id}", daemon=True).start()
         return job
 
+    def cancel(self) -> None:
+        """Interrupt the current skill without commanding the body (used when the world restarts)."""
+        self._stop.set()
+
     def stop(self) -> dict:
         self._stop.set()
         st = self._state()

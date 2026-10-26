@@ -26,11 +26,16 @@ def _robot_model() -> dict:
     return steward_bot().to_dict()
 
 
-def _wait_forever(stoppers: list) -> None:
+def _wait_forever(stoppers: list, pump=None) -> None:
+    """Block until SIGINT/SIGTERM; the main thread serves render requests through ``pump``."""
     done = threading.Event()
     signal.signal(signal.SIGINT, lambda *_: done.set())
     signal.signal(signal.SIGTERM, lambda *_: done.set())
-    done.wait()
+    while not done.is_set():
+        if pump is not None:
+            pump(0.05)
+        else:
+            done.wait(0.5)
     for stop in stoppers:
         stop()
 
@@ -56,7 +61,7 @@ def cmd_world(args) -> int:
     host = _host(args, run_dir)
     print(json.dumps({"wca": host.wca.url, "robots": {k: v.url for k, v in host.robot_servers.items()},
                       "runDir": str(run_dir)}), flush=True)
-    _wait_forever([host.stop])
+    _wait_forever([host.stop], host.pump)
     return 0
 
 
@@ -84,7 +89,7 @@ def cmd_up(args) -> int:
     runtime, api = _start_ego(robot_url, args.api_port, run_dir / "ego")
     print(json.dumps({"wca": host.wca.url, "robot": robot_url, "egoApi": api.url, "runDir": str(run_dir),
                       "task": host.scenario["task"]}, ensure_ascii=False), flush=True)
-    _wait_forever([api.stop, runtime.stop, host.stop])
+    _wait_forever([api.stop, runtime.stop, host.stop], host.pump)
     return 0
 
 
@@ -98,12 +103,20 @@ def cmd_demo(args) -> int:
     host = _host(args, run_dir)
     runtime, api = _start_ego(host.robot_servers["w:robot-1"].url, 0, run_dir / "ego")
     t0 = time.monotonic()
-    try:
-        result = cup_to_table(api.url)
-        ok_mission = True
-    except MissionFailed as exc:
-        result = {"error": str(exc)}
-        ok_mission = False
+    outcome: dict = {}
+
+    def mission() -> None:
+        try:
+            outcome["result"] = cup_to_table(api.url)
+        except MissionFailed as exc:
+            outcome["error"] = str(exc)
+
+    worker = threading.Thread(target=mission, name="mission", daemon=True)
+    worker.start()
+    while worker.is_alive():
+        host.pump(0.05)
+    ok_mission = "result" in outcome
+    result = outcome.get("result") or {"error": outcome.get("error")}
     time.sleep(1.0 / max(args.speed, 0.1))
     ws = host.sim.world_state()
     on_table = any(r["type"] == "supported-by" and r["a"]["entity"] == "w:cup-1" and r["b"]["entity"] == "w:table-1"

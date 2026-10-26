@@ -15,6 +15,7 @@ from __future__ import annotations
 import copy
 import io
 import math
+import queue
 import threading
 import time
 from dataclasses import dataclass, field
@@ -50,6 +51,16 @@ class GraspConfig:
 
 
 @dataclass
+class _RenderRequest:
+    camera: str
+    width: int
+    height: int
+    done: threading.Event = field(default_factory=threading.Event)
+    png: bytes = b""
+    error: Exception | None = None
+
+
+@dataclass
 class _RobotState:
     entity_id: str
     closed: bool = False
@@ -74,6 +85,7 @@ class WorldSim:
         self._running = False
         self.paused = False
         self.events: list[dict] = []
+        self._render_requests: queue.Queue[_RenderRequest] = queue.Queue()
         self._load(self._initial_scene)
 
     # ------------------------------------------------------------------ setup
@@ -415,8 +427,41 @@ class WorldSim:
         return False
 
     # --------------------------------------------------------------- rendering
-    def render(self, camera: str, width: int = 640, height: int = 480) -> bytes:
-        """Render an RGB PNG from a named MuJoCo camera."""
+    def render(self, camera: str, width: int = 640, height: int = 480, timeout: float = 10.0) -> bytes:
+        """Render an RGB PNG from a named MuJoCo camera.
+
+        OpenGL rendering must run on the main thread on macOS. Calls from other threads queue a
+        request and wait for the main thread to serve it through :meth:`pump`; without a pumping
+        main thread they raise ``TimeoutError`` instead of blocking the simulation.
+        """
+        if threading.current_thread() is threading.main_thread():
+            return self._render_now(camera, width, height)
+        request = _RenderRequest(camera, width, height)
+        self._render_requests.put(request)
+        if not request.done.wait(timeout):
+            raise TimeoutError("rendering needs the main thread to call WorldSim.pump()")
+        if request.error is not None:
+            raise request.error
+        return request.png
+
+    def pump(self, timeout: float = 0.05) -> None:
+        """Serve queued render requests on the calling (main) thread, waiting up to ``timeout``."""
+        try:
+            request = self._render_requests.get(timeout=timeout)
+        except queue.Empty:
+            return
+        while True:
+            try:
+                request.png = self._render_now(request.camera, request.width, request.height)
+            except Exception as exc:  # noqa: BLE001 - re-raised on the requesting thread
+                request.error = exc
+            request.done.set()
+            try:
+                request = self._render_requests.get_nowait()
+            except queue.Empty:
+                return
+
+    def _render_now(self, camera: str, width: int, height: int) -> bytes:
         with self.lock:
             key = (width, height)
             if key not in self._renderers:

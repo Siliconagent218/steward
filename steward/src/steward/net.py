@@ -107,7 +107,9 @@ class JsonServer:
         return self
 
     def stop(self) -> None:
-        self._httpd.shutdown()
+        if self._thread is not None:
+            self._httpd.shutdown()
+            self._thread = None
         self._httpd.server_close()
 
 

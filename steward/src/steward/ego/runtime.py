@@ -78,7 +78,16 @@ class EgoRuntime:
     def _poll_once(self) -> None:
         frame = self.link.sensors()
         with self._lock:
+            if frame["stamp"] < self.estimator.stamp - 1e-6:
+                self._restart()
             self.estimator.update(frame)
+
+    def _restart(self) -> None:
+        """The world clock went backwards: a new episode started, which the robot experiences as a
+        reboot. Forget the Ego-State, receipts and any running skill."""
+        self.executor.cancel()
+        self.estimator = EgoEstimator(robot_model=self.estimator.robot_model, config=self.estimator.config)
+        self.receipts.clear()
 
     def _loop(self) -> None:
         period = 1.0 / self.config.perception_hz

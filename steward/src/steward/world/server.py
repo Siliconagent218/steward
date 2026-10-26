@@ -11,12 +11,25 @@ Two kinds of listeners keep the information boundary explicit:
 
 from __future__ import annotations
 
+import queue
+import threading
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from steward.authoring.service import AuthoringError, AuthoringService
 from steward.net import Binary, HttpError, JsonServer
 from steward.observer.observer import Observer
 from steward.world.sim import WorldSim
+
+
+@dataclass
+class _MainTask:
+    fn: Any
+    done: threading.Event = field(default_factory=threading.Event)
+    result: Any = None
+    error: BaseException | None = None
 
 
 class StewardHost:
@@ -32,6 +45,7 @@ class StewardHost:
         self.wca = JsonServer(self._wca_routes(), port=wca_port, name="wca")
         self._robot_port_config = robot_ports or {}
         self.robot_servers: dict[str, JsonServer] = {}
+        self._main_tasks: queue.Queue[_MainTask] = queue.Queue()
         if scenario is not None:
             self.load_episode(scenario)
 
@@ -53,6 +67,40 @@ class StewardHost:
         if self.sim is None:
             raise HttpError(409, "no episode is loaded")
         return self.sim
+
+    def on_main(self, fn, timeout: float = 120.0):
+        """Run ``fn`` on the process main thread and return its result.
+
+        Anything that creates, uses or releases OpenGL renderers (episode load and reset,
+        previews) must run on the main thread on macOS; request threads queue it here and the
+        main thread executes it in :meth:`pump`.
+        """
+        if threading.current_thread() is threading.main_thread():
+            return fn()
+        task = _MainTask(fn)
+        self._main_tasks.put(task)
+        if not task.done.wait(timeout):
+            raise HttpError(503, "the Steward main thread did not run the request")
+        if task.error is not None:
+            raise task.error
+        return task.result
+
+    def pump(self, timeout: float = 0.05) -> None:
+        """Run queued main-thread tasks and serve render requests; call repeatedly from the main thread."""
+        while True:
+            try:
+                task = self._main_tasks.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                task.result = task.fn()
+            except BaseException as exc:  # noqa: BLE001 - re-raised on the requesting thread
+                task.error = exc
+            task.done.set()
+        if self.sim is not None:
+            self.sim.pump(timeout)
+        else:
+            time.sleep(timeout)
 
     def start(self) -> StewardHost:
         self.wca.start()
@@ -84,11 +132,14 @@ class StewardHost:
         def episode(q, b):
             action = b.get("action")
             if action == "load":
-                result = self.load_episode(b["scenario"])
-                self.sim.start()
-                return result
+                def load() -> dict:
+                    result = self.load_episode(b["scenario"])
+                    self.sim.start()
+                    return result
+                return self.on_main(load)
             if action == "reset":
-                self._require_sim().reset()
+                sim = self._require_sim()
+                self.on_main(sim.reset)
                 return {"reset": True}
             raise HttpError(400, "action must be load or reset")
 
@@ -126,12 +177,14 @@ class StewardHost:
             ("GET", "/assets/get"): guard(lambda q, b: a.library.get(q["name"], q.get("version"))),
             ("POST", "/assets/create"): guard(lambda q, b: a.create_asset(b.get("generator"), b.get("params"),
                                                                           b.get("template"))),
-            ("POST", "/assets/preview"): guard(lambda q, b: {"images": a.preview_asset(b["template"],
-                                                                                       b.get("stem", "draft"))}),
-            ("POST", "/assets/publish"): guard(lambda q, b: a.publish_asset(b["name"], b["template"], b.get("meta"))),
+            ("POST", "/assets/preview"): guard(lambda q, b: {"images": self.on_main(
+                lambda: a.preview_asset(b["template"], b.get("stem", "draft")))}),
+            ("POST", "/assets/publish"): guard(lambda q, b: self.on_main(
+                lambda: a.publish_asset(b["name"], b["template"], b.get("meta")))),
             ("GET", "/scenes"): guard(lambda q, b: {"scenes": a.list_scenes()}),
             ("POST", "/scenes/compose"): guard(lambda q, b: a.compose_scene(b)),
-            ("POST", "/scenes/render"): guard(lambda q, b: {"images": a.render_scene_views(b["name"])}),
+            ("POST", "/scenes/render"): guard(lambda q, b: {"images": self.on_main(
+                lambda: a.render_scene_views(b["name"]))}),
             ("GET", "/scenarios"): guard(lambda q, b: {"scenarios": a.list_scenarios()}),
             ("POST", "/scenarios/save"): guard(lambda q, b: a.save_scenario(b)),
         }
