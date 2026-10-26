@@ -1,6 +1,6 @@
 # Steward
 
-Steward 是基于 DeepSeek Harness 的具身智能机器人系统。设计见仓库根目录的 [steward.md](../steward.md)，当前实现状态见其中的「11.1 Phase 0 实现说明」。
+Steward 是基于 DeepSeek Harness 的具身智能机器人系统。设计见仓库根目录的 [steward.md](../steward.md)，当前实现进度与运行命令见其中的「13. Implementation Progress」。
 
 ## 快速开始
 

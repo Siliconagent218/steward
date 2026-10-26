@@ -1185,7 +1185,7 @@ Observer 只读取 GT、扰动事件与遥测通道数据，结果写入 Recorde
 
 ## 9. 仓库与包结构
 
-Steward 位于 fork 仓库中，只新增文件。下面是目标结构；Phase 0 已实现部分的实际布局见 11.1。
+Steward 位于 fork 仓库中，只新增文件。下面是目标结构；已实现部分的实际布局见 13.3。
 
 ```
 steward（fork 仓库根目录）
@@ -1255,9 +1255,51 @@ steward（fork 仓库根目录）
 | Phase 4 | 多机器人与显式通信 | 两台机器人协作完成任务且无信息泄漏 |
 | Phase 5 | 实体机器人：Real HAL、标定、动作捕捉近似 GT | 同一 EH bundle 无代码修改在实机上完成 Phase 3 任务 |
 
-### 11.1 Phase 0 实现说明
+各阶段的当前进度见第 13 节。
 
-#### 实际布局
+## 12. 待决问题
+
+1. ESim 的物理保真度与推演成本如何折中？是否需要学习型世界模型与物理引擎混合？
+2. 步进时钟模式下，EH 的思考时间计入还是冻结，对评估结论的影响如何量化？
+3. Skill 库的粒度：多少由 VLA 端到端完成，多少由显式规划组合？
+4. 多机器人通信协议的语义层级（共享观测、共享意图、任务分配）。
+5. 实体部署时 EH 的模型推理位置（本机、边缘服务器、云端）与断网降级策略。
+6. WH 生成资产的几何与物理真实度如何量化评估？是否需要人工审核关口？
+7. 由 WH 自动生成对抗性扰动（"红队"）时，如何保证扰动强度可控、不同 Ego 版本之间比较公平？
+8. 运行中增删资产采用 mjSpec 重编译还是预置物体池，对性能与确定性的影响需要实测。
+9. 哪些 Steward 能力适合反馈给上游成为通用扩展点（例如面向连续物理系统的工具执行时限语义）。
+
+## 13. Implementation Progress
+
+### 13.1 当前阶段
+
+截至 2026-10-26，**Phase 0 已实现**，脚本化验收全部通过。Phase 0 验收中由语言模型驱动的两项（机器人智能体自主完成任务、WH 从文字描述生成厨房）的工具与 profile 已就绪，待配置 `DEEPSEEK_API_KEY` 后运行。
+
+| 阶段 | 状态 | 说明 |
+|---|---|---|
+| Phase 0 | 已实现 | 世界仿真、资产与场景构建、单机器人理想感知、ES 估计、简化 ESim、技能执行、Observer、EH 与 WH 两个 DSH bundle |
+| Phase 1 | 未开始 | 真实感知链路、定位误差、Protobuf 协议、EH 工具返回图像 |
+| Phase 2 | 未开始 | ESim 物理推演、扰动与触发器、WH 向机器人派发任务 |
+| Phase 3 | 未开始 | 精细操作技能、长时任务 |
+| Phase 4 | 未开始 | 多机器人与显式通信 |
+| Phase 5 | 未开始 | 实体机器人 |
+
+### 13.2 已实现功能
+
+| 组件 | 功能 |
+|---|---|
+| 场景数据模型 | 第 4.2 节的 `SceneState`：WS 与 ES 共用的数据结构；`validate_world` / `validate_ego` 两种校验，ES 中出现 `w:` 标识即判定为信息泄漏；WSim 与 ESim 共用的 `SceneState → MJCF` 转换器；实体有向包围盒计算 |
+| 资产 | 生成器：建筑外壳、操作台、餐桌、带抽屉的柜子、杯子、盘子、碗、Phase 0 移动操作机器人；MuJoCo 物理校验（编译、质量、跌落、倾倒、穿透）；多视角预览渲染；按模板哈希寻址、带版本的资产库；也接受直接编写的实体模板 |
+| 场景与 Scenario | 从已发布资产组合场景（地面摆放或放在其他实体上），检查相互穿透与沉降；保存与加载 Scenario；默认 Phase 0 厨房 |
+| WSim | 固定步长物理，按墙钟倍速推进；机器人底盘、升降、伸缩位置控制；理想抓取；带噪声的里程计与关节编码器；理想检测器（视野、遮挡、距离相关噪声、类别混淆）；World State 读回与「支撑」「附着」关系推导；总览与机器人相机渲染 |
+| Steward 主机 | 世界控制接口 WCA（状态、World State、时钟、Episode、渲染、Observer 报告、资产 / 场景 / Scenario 编写）；每个机器人一个独立端口，只提供传感器、相机、执行器命令与单向遥测 |
+| Ego Runtime | 检测融合为 ES（机器人自分配 `e:` id、卡尔曼位置融合、类别分布、存在概率、重复轨迹合并、支撑与附着关系）；基于 ES 的二维路径规划与停靠足迹检查；简化 ESim 与 Prediction Receipt；导航、抓取、放置、环顾技能；Ego API；运行端再次核验收据 |
+| Observer | ES 与 World State 关联；召回率、误检、位置误差、类别准确率、NEES、自定位误差；JSONL 记录；泄漏检测 |
+| Ego Harness bundle | `ctx.ego` 服务定义与 HTTP 提供者；机器人工具 `ego_state`、`ego_query`、`ego_observe`、`ego_explore`、`ego_predict`、`skill_run`、`skill_status`、`body_stop`；安全守卫（`tools/pre-execute` 收据核验、`ctx.tools.guard` 最终否决、`/estop` 急停） |
+| World Harness bundle | `ctx.world` 服务定义与 HTTP 提供者；工具 `world_status`、`world_scene`、`asset_search`、`asset_get`、`asset_create`、`asset_preview`、`asset_publish`、`scene_compose`、`scene_render`、`scenario_save`、`world_catalog`、`episode_control`、`world_clock`、`observer_report` |
+| 检查与工具 | pytest 23 项；DSH 单元测试与跨语言集成测试 5 项；组合配置快照比对；多随机种子回归脚本；命令行 `steward build-kitchen / world / ego / up / demo` |
+
+### 13.3 实际布局
 
 ```
 steward/
@@ -1292,22 +1334,47 @@ steward/
 └── compat/snapshots/                # ego 与 world profile 的组合配置快照
 ```
 
-#### 运行方式
+### 13.4 运行命令
+
+环境要求：Python ≥ 3.11 与 `uv`；Node.js `^22.19 || >=24` 与 pnpm 11（只在使用 DSH 时需要）。以下命令在仓库的 `steward/` 目录下执行。
 
 ```sh
-cd steward
-uv sync                                       # 或使用已有的 .venv
-.venv/bin/steward demo                        # 构建厨房（首次）并运行脚本化任务，按 World State 判定成败
-.venv/bin/steward up                          # 常驻：WCA :7400，机器人端口 :7410，Ego API :7420
-./scripts/setup-dsh-profiles.sh               # 构建 DSH 插件并创建 ego / world profile
-DSH_HOME=var/dsh/robot-1 dsh/node_modules/.bin/dsh --profile ego "把杯子放到桌上"   # 需要 DEEPSEEK_API_KEY
-DSH_HOME=var/dsh/world dsh/node_modules/.bin/dsh --profile world --port 3091        # WH 浏览器界面
-./scripts/check.sh                            # 全部检查
+# 安装 Python 依赖
+uv sync
+
+# 脚本化端到端演示：首次运行会构建厨房，最后按 World State 判定杯子是否在桌上
+.venv/bin/steward demo
+
+# 只构建默认厨房（资产、场景、Scenario），数据写入 var/steward
+.venv/bin/steward build-kitchen
+
+# 常驻运行世界与一个机器人：WCA :7400，机器人端口 :7410，Ego API :7420
+.venv/bin/steward up
+
+# 分别运行世界与机器人（可放在不同进程或机器上）
+.venv/bin/steward world --wca-port 7400 --robot-port 7410
+.venv/bin/steward ego --robot-url http://127.0.0.1:7410 --api-port 7420
+
+# 构建 DSH 插件，在 var/dsh 下创建 ego（机器人）与 world（世界）两个独立 DSH_HOME
+./scripts/setup-dsh-profiles.sh
+
+# 由语言模型驱动机器人（需要 DEEPSEEK_API_KEY，并先运行 steward up）
+DSH_HOME=var/dsh/robot-1 dsh/node_modules/.bin/dsh --profile ego "把杯子放到桌上"
+
+# 打开 World Harness 浏览器界面（需要 DEEPSEEK_API_KEY，并先运行 steward up 或 steward world）
+DSH_HOME=var/dsh/world dsh/node_modules/.bin/dsh --profile world --port 3091
+
+# 全部检查：Python 测试、DSH 编译与测试、组合配置快照比对
+./scripts/check.sh
+UPDATE_SNAPSHOTS=1 ./scripts/check.sh      # 评审后接受新的组合配置
+
+# 多随机种子回归，逐个种子显示进度条
+.venv/bin/python scripts/seed_sweep.py --seeds 20
 ```
 
-EH profile 默认从上游 `headless` 模板派生，WH profile 从上游 `web` 模板派生。DSH 运行时是 npm 上锁定的 `@deepseek-ai/dsh@0.2.1-rc.3`，安装在 `steward/dsh/node_modules`，不使用 fork 中的上游源码构建。
+EH profile 默认从上游 `headless` 模板派生（设置 `ROBOT_TEMPLATE=web` 可改为浏览器界面），WH profile 从上游 `web` 模板派生。DSH 运行时是 npm 上锁定的 `@deepseek-ai/dsh@0.2.1-rc.3`，安装在 `steward/dsh/node_modules`，不使用 fork 中的上游源码构建。
 
-#### 已验证
+### 13.5 已验证
 
 | 验收项 | 证据 |
 |---|---|
@@ -1318,7 +1385,9 @@ EH profile 默认从上游 `headless` 模板派生，WH profile 从上游 `web` 
 | 信息隔离 | `validate_ego` 检测 `w:` 标识；机器人端口不提供 WCA 路由，传感器帧不含 World State 标识 |
 | DSH 加载 | `--dump-config` 显示 `dsh-base → dsh-headless → @steward/dsh-bundle-ego`；非法端点在加载时被拒并指明配置行；WH Web 界面正常启动 |
 
-#### 与设计的偏差（Phase 0 简化，后续阶段替换）
+### 13.6 与设计的偏差
+
+以下是 Phase 0 的简化，在后续阶段替换。
 
 | 设计 | Phase 0 实现 | 计划 |
 |---|---|---|
@@ -1331,15 +1400,3 @@ EH profile 默认从上游 `headless` 模板派生，WH profile 从上游 `web` 
 | WH 经 SDK 向机器人派发任务（`task_dispatch`） | 未实现；实验员直接向 EH 下达任务 | Phase 2 |
 | EH 工具返回相机图像 | `ego_observe` 只返回文字结果与图像文件路径；WH 预览图通过上游文件读取工具查看 | Phase 1 接入附件服务 |
 | EH 能力集评审 | EH 继承 `dsh-base` 的通用工具（shell、文件、网页等），已纳入组合配置快照，尚未决定禁用哪些 | Phase 1 前评审 |
-
-## 12. 待决问题
-
-1. ESim 的物理保真度与推演成本如何折中？是否需要学习型世界模型与物理引擎混合？
-2. 步进时钟模式下，EH 的思考时间计入还是冻结，对评估结论的影响如何量化？
-3. Skill 库的粒度：多少由 VLA 端到端完成，多少由显式规划组合？
-4. 多机器人通信协议的语义层级（共享观测、共享意图、任务分配）。
-5. 实体部署时 EH 的模型推理位置（本机、边缘服务器、云端）与断网降级策略。
-6. WH 生成资产的几何与物理真实度如何量化评估？是否需要人工审核关口？
-7. 由 WH 自动生成对抗性扰动（"红队"）时，如何保证扰动强度可控、不同 Ego 版本之间比较公平？
-8. 运行中增删资产采用 mjSpec 重编译还是预置物体池，对性能与确定性的影响需要实测。
-9. 哪些 Steward 能力适合反馈给上游成为通用扩展点（例如面向连续物理系统的工具执行时限语义）。
