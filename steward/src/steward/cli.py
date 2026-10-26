@@ -59,7 +59,7 @@ def _host(args, run_dir: Path):
 def cmd_world(args) -> int:
     run_dir = Path(args.root) / "runs" / time.strftime("%Y%m%d-%H%M%S")
     host = _host(args, run_dir)
-    print(json.dumps({"wca": host.wca.url, "robots": {k: v.url for k, v in host.robot_servers.items()},
+    print(json.dumps({"console": f"{host.wca.url}/console", "wca": host.wca.url, "robots": {k: v.url for k, v in host.robot_servers.items()},
                       "runDir": str(run_dir)}), flush=True)
     _wait_forever([host.stop], host.pump)
     return 0
@@ -87,7 +87,7 @@ def cmd_up(args) -> int:
     host = _host(args, run_dir)
     robot_url = host.robot_servers["w:robot-1"].url
     runtime, api = _start_ego(robot_url, args.api_port, run_dir / "ego")
-    print(json.dumps({"wca": host.wca.url, "robot": robot_url, "egoApi": api.url, "runDir": str(run_dir),
+    print(json.dumps({"console": f"{host.wca.url}/console", "wca": host.wca.url, "robot": robot_url, "egoApi": api.url, "runDir": str(run_dir),
                       "task": host.scenario["task"]}, ensure_ascii=False), flush=True)
     _wait_forever([api.stop, runtime.stop, host.stop], host.pump)
     return 0

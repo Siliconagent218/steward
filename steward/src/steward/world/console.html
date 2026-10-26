@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Steward 控制台</title>
+<style>
+  :root { --bg: #0f1216; --card: #171b21; --line: #2a313a; --text: #dde3ea; --muted: #8b96a3;
+          --gt: #4aa3ff; --ego: #ff9f43; --ok: #3ecf8e; --warn: #f5c451; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI", sans-serif;
+         background: var(--bg); color: var(--text); }
+  header { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; padding: 10px 16px;
+           border-bottom: 1px solid var(--line); position: sticky; top: 0; background: var(--bg); z-index: 2; }
+  header h1 { font-size: 16px; margin: 0 12px 0 0; font-weight: 600; }
+  header .spacer { flex: 1; }
+  button, select { background: #222831; color: var(--text); border: 1px solid var(--line); border-radius: 6px;
+                   padding: 5px 10px; font: inherit; cursor: pointer; }
+  button:hover { border-color: #3c4652; }
+  .pill { padding: 2px 8px; border-radius: 999px; background: #222831; color: var(--muted); font-variant-numeric: tabular-nums; }
+  main { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(320px, 1fr); gap: 14px; padding: 14px 16px; }
+  @media (max-width: 860px) { main { grid-template-columns: 1fr; } }
+  #map { max-height: 70vh; width: auto; max-width: 100%; margin: 0 auto; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 12px; }
+  .card h2 { font-size: 13px; font-weight: 600; color: var(--muted); margin: 0 0 8px; display: flex; gap: 10px; align-items: center; }
+  .stack { display: grid; gap: 14px; align-content: start; }
+  canvas { width: 100%; display: block; border-radius: 6px; background: #11151a; }
+  .cams { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .cams figure { margin: 0; }
+  .cams img { width: 100%; border-radius: 6px; background: #11151a; aspect-ratio: 4 / 3; object-fit: cover; display: block; }
+  .cams img:not([src]) { visibility: hidden; }
+  .cams figcaption { color: var(--muted); font-size: 12px; margin-top: 4px; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  td { padding: 3px 0; border-bottom: 1px solid #20262e; }
+  td:last-child { text-align: right; }
+  .legend { display: flex; flex-wrap: wrap; gap: 12px; color: var(--muted); font-size: 12px; margin-top: 8px; }
+  .legend label { display: inline-flex; gap: 5px; align-items: center; cursor: pointer; }
+  .sw { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+  .events { max-height: 170px; overflow: auto; font-size: 12px; color: var(--muted); margin: 0; padding-left: 18px; }
+  .task { color: var(--muted); }
+  .err { color: #ff6b6b; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Steward 控制台</h1>
+  <select id="scenario" title="Scenario"></select>
+  <button id="load">加载</button>
+  <button id="reset">重置</button>
+  <button id="pause">暂停</button>
+  <select id="speed" title="仿真倍速">
+    <option value="0.5">0.5×</option><option value="1">1×</option><option value="2">2×</option>
+    <option value="4">4×</option><option value="8">8×</option>
+  </select>
+  <span class="pill" id="clock">t = –</span>
+  <span class="task" id="task"></span>
+  <span class="spacer"></span>
+  <span class="err" id="error"></span>
+</header>
+<main>
+  <section class="card">
+    <h2>俯视地图 <span class="pill" id="robotPick"></span></h2>
+    <canvas id="map" width="1100" height="860"></canvas>
+    <div class="legend">
+      <label><input type="checkbox" id="showGt" checked><span class="sw" style="background:var(--gt)"></span>世界真实状态</label>
+      <label><input type="checkbox" id="showEgo" checked><span class="sw" style="background:var(--ego)"></span>机器人自我态</label>
+      <label><input type="checkbox" id="showSigma" checked>2σ 不确定度</label>
+      <label><input type="checkbox" id="showMatch" checked>关联线</label>
+      <label><input type="checkbox" id="showLabels" checked>标签</label>
+    </div>
+  </section>
+  <div class="stack">
+    <section class="card">
+      <h2>相机</h2>
+      <div class="cams">
+        <figure><img id="camOverview" alt="总览相机"><figcaption>总览（世界）</figcaption></figure>
+        <figure><img id="camRobot" alt="机器人头部相机"><figcaption id="robotCamLabel">机器人头部相机</figcaption></figure>
+      </div>
+    </section>
+    <section class="card">
+      <h2>Observer 指标</h2>
+      <table id="metrics"></table>
+      <canvas id="chart" width="700" height="170" style="margin-top:10px"></canvas>
+    </section>
+    <section class="card">
+      <h2>事件</h2>
+      <ol class="events" id="events"></ol>
+    </section>
+  </div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const COLORS = { table: '#c9a46b', counter: '#8a6a4a', cabinet: '#a07850', cup: '#7fd3ff', bowl: '#e8e8ea',
+  plate: '#f2f2f2', 'steward-bot': '#4aa3ff', wall: '#5b6570', floor: '#1c2128' };
+let state = null;
+let robotId = null;
+
+async function api(method, path, body) {
+  const res = await fetch(path, { method, headers: { 'content-type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body) });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  return data;
+}
+
+function showError(e) { $('error').textContent = e ? String(e.message || e) : ''; }
+
+async function refresh() {
+  try {
+    state = await api('GET', '/console/state');
+    showError(null);
+    if (!state.loaded) { $('clock').textContent = '未加载 Episode'; return; }
+    robotId = robotId && state.robots[robotId] ? robotId : Object.keys(state.robots)[0];
+    $('clock').textContent = `t = ${state.t.toFixed(1)} s`;
+    $('task').textContent = state.task ? `任务：${state.task}` : '';
+    $('pause').textContent = state.paused ? '继续' : '暂停';
+    if (document.activeElement !== $('speed')) $('speed').value = String(state.speed);
+    $('robotPick').textContent = robotId || '';
+    drawMap(); drawMetrics(); drawEvents();
+  } catch (e) { showError(e); }
+}
+
+function bounds() {
+  const floor = state.groundTruth.find(b => b.category === 'floor');
+  if (floor) return { cx: floor.center[0], cy: floor.center[1], w: floor.size[0] + 0.6, h: floor.size[1] + 0.6 };
+  return { cx: 0, cy: 0, w: 8, h: 6 };
+}
+
+function drawMap() {
+  const cv = $('map'), ctx = cv.getContext('2d');
+  const b = bounds();
+  const wantH = Math.round(cv.width * b.h / b.w);
+  if (cv.height !== wantH) cv.height = wantH;
+  const scale = Math.min(cv.width / b.w, cv.height / b.h);
+  const toPx = (x, y) => [cv.width / 2 + (x - b.cx) * scale, cv.height / 2 - (y - b.cy) * scale];
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  const rect = (c, size, yaw, fill, stroke, dash) => {
+    const [px, py] = toPx(c[0], c[1]);
+    ctx.save(); ctx.translate(px, py); ctx.rotate(-yaw);
+    ctx.setLineDash(dash || []);
+    if (fill) { ctx.fillStyle = fill; ctx.fillRect(-size[0] * scale / 2, -size[1] * scale / 2, size[0] * scale, size[1] * scale); }
+    if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 2; ctx.strokeRect(-size[0] * scale / 2, -size[1] * scale / 2, size[0] * scale, size[1] * scale); }
+    ctx.restore();
+  };
+  const label = (c, text, color, dy) => {
+    if (!$('showLabels').checked) return;
+    const [px, py] = toPx(c[0], c[1]);
+    ctx.fillStyle = color; ctx.font = '20px -apple-system, sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText(text, px, py + (dy || 0));
+  };
+  const arrow = (x, y, yaw, color, len) => {
+    const [px, py] = toPx(x, y);
+    ctx.strokeStyle = color; ctx.lineWidth = 3; ctx.setLineDash([]);
+    ctx.beginPath(); ctx.moveTo(px, py);
+    ctx.lineTo(px + Math.cos(yaw) * len, py - Math.sin(yaw) * len); ctx.stroke();
+  };
+  // grid
+  ctx.strokeStyle = '#1a2027'; ctx.lineWidth = 1;
+  for (let x = Math.ceil(b.cx - b.w / 2); x <= b.cx + b.w / 2; x++) {
+    const [px] = toPx(x, 0); ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, cv.height); ctx.stroke();
+  }
+  for (let y = Math.ceil(b.cy - b.h / 2); y <= b.cy + b.h / 2; y++) {
+    const [, py] = toPx(0, y); ctx.beginPath(); ctx.moveTo(0, py); ctx.lineTo(cv.width, py); ctx.stroke();
+  }
+  const gtById = {};
+  if ($('showGt').checked) {
+    for (const g of state.groundTruth) {
+      gtById[g.id] = g;
+      if (g.category === 'floor') { rect(g.center, g.size, g.yaw, COLORS.floor); continue; }
+      const color = COLORS[g.category] || '#8fa3b8';
+      const alpha = g.role === 'environment' ? 'ff' : 'b0';
+      rect(g.center, g.size, g.yaw, color + alpha, g.role === 'robot' ? '#9cd0ff' : null);
+      if (g.role === 'robot') arrow(g.center[0], g.center[1], g.yaw, '#9cd0ff', 34);
+      if (g.role !== 'environment') label(g.center, g.id.replace('w:', ''), '#cfe6ff', -Math.max(g.size[1] * scale / 2, 10) - 4);
+    }
+  } else {
+    for (const g of state.groundTruth) gtById[g.id] = g;
+  }
+  const robot = robotId && state.robots[robotId];
+  const ego = robot && robot.ego;
+  if (ego && $('showEgo').checked) {
+    for (const o of ego.objects) {
+      const faded = o.existence < 0.5 ? '66' : 'ff';
+      rect(o.center, o.size, o.yaw, null, '#ff9f43' + faded, [6, 4]);
+      if ($('showSigma').checked && o.sigma > 0) {
+        const [px, py] = toPx(o.center[0], o.center[1]);
+        ctx.setLineDash([]); ctx.strokeStyle = '#ff9f4388'; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.arc(px, py, Math.max(2 * o.sigma * scale, 3), 0, Math.PI * 2); ctx.stroke();
+      }
+      label(o.center, o.id, '#ffc58a', Math.max(o.size[1] * scale / 2, 10) + 22);
+    }
+    if (ego.self) {
+      const [px, py] = toPx(ego.self.x, ego.self.y);
+      ctx.fillStyle = '#ff9f43'; ctx.beginPath(); ctx.arc(px, py, 6, 0, Math.PI * 2); ctx.fill();
+      arrow(ego.self.x, ego.self.y, ego.self.yaw, '#ff9f43', 26);
+    }
+  }
+  if (robot && $('showMatch').checked && ego) {
+    ctx.setLineDash([2, 4]); ctx.strokeStyle = '#3ecf8e'; ctx.lineWidth = 1.5;
+    for (const [egoId, gtId] of Object.entries(robot.matches || {})) {
+      const o = ego.objects.find(x => x.id === egoId), g = gtById[gtId];
+      if (!o || !g) continue;
+      const [ax, ay] = toPx(o.center[0], o.center[1]), [bx, by] = toPx(g.center[0], g.center[1]);
+      ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
+    }
+  }
+  ctx.setLineDash([]);
+}
+
+function fmt(v, digits, unit) {
+  if (v === null || v === undefined) return '–';
+  return (typeof v === 'number' ? v.toFixed(digits) : v) + (unit || '');
+}
+
+function drawMetrics() {
+  const robot = robotId && state.robots[robotId];
+  const m = (robot && robot.metrics) || {};
+  const holding = state.holding[robotId] || {};
+  const rows = [
+    ['物体召回率', m.recall === null || m.recall === undefined ? '–' : (m.recall * 100).toFixed(0) + '%'],
+    ['误检数', fmt(m.falsePositives, 0)],
+    ['平均位置误差', m.meanPositionErrorM == null ? '–' : (m.meanPositionErrorM * 100).toFixed(2) + ' cm'],
+    ['NEES（三维理论值 3）', fmt(m.meanNees3, 2)],
+    ['类别准确率', m.categoryAccuracy == null ? '–' : (m.categoryAccuracy * 100).toFixed(0) + '%'],
+    ['自定位误差', m.selfPositionErrorM == null ? '–' : (m.selfPositionErrorM * 100).toFixed(2) + ' cm'],
+    ['夹爪', `${holding.gripper || '–'}${holding.holding ? '，持有 ' + holding.holding : ''}`],
+    ['ES 版本', fmt(robot && robot.ego && robot.ego.version, 0)],
+  ];
+  $('metrics').innerHTML = rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
+  const cv = $('chart'), ctx = cv.getContext('2d');
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  const hist = (robot && robot.errorHistory) || [];
+  ctx.fillStyle = '#8b96a3'; ctx.font = '12px -apple-system, sans-serif'; ctx.textAlign = 'left';
+  ctx.fillText('平均位置误差（cm）随仿真时间', 8, 16);
+  if (hist.length < 2) return;
+  const t0 = hist[0][0], t1 = hist[hist.length - 1][0];
+  const maxE = Math.max(...hist.map(h => h[1])) * 100 || 1;
+  const x = t => 40 + (t - t0) / Math.max(t1 - t0, 1e-6) * (cv.width - 50);
+  const y = e => cv.height - 20 - (e * 100) / maxE * (cv.height - 45);
+  ctx.strokeStyle = '#2a313a'; ctx.beginPath(); ctx.moveTo(40, y(0)); ctx.lineTo(cv.width - 10, y(0)); ctx.stroke();
+  ctx.fillText(maxE.toFixed(1), 6, y(maxE / 100) + 4); ctx.fillText('0', 24, y(0) + 4);
+  ctx.strokeStyle = '#ff9f43'; ctx.lineWidth = 2; ctx.beginPath();
+  hist.forEach(([t, e], i) => i ? ctx.lineTo(x(t), y(e)) : ctx.moveTo(x(t), y(e)));
+  ctx.stroke();
+}
+
+function drawEvents() {
+  const names = { 'grasp/attach': '抓取', 'grasp/release': '放下', 'grasp/miss': '抓空', 'episode/reset': 'Episode 重置' };
+  $('events').innerHTML = state.events.slice().reverse().map(e =>
+    `<li>t=${e.t.toFixed(1)} s　${names[e.type] || e.type}${e.entity ? '　' + e.entity : ''}${e.robot ? '（' + e.robot + '）' : ''}</li>`
+  ).join('') || '<li>暂无</li>';
+}
+
+function refreshCamera(img, camera, width, height) {
+  if (img.dataset.busy === '1' || !state || !state.loaded) return;
+  img.dataset.busy = '1';
+  const next = new Image();
+  next.onload = () => { img.src = next.src; img.dataset.busy = '0'; };
+  next.onerror = () => { img.dataset.busy = '0'; };
+  next.src = `/wca/render?camera=${encodeURIComponent(camera)}&width=${width}&height=${height}&t=${Date.now()}`;
+}
+
+async function loadScenarios() {
+  try {
+    const { scenarios } = await api('GET', '/scenarios');
+    $('scenario').innerHTML = scenarios.map(s => `<option>${s}</option>`).join('');
+    if (state && state.scenario) $('scenario').value = state.scenario;
+  } catch (e) { showError(e); }
+}
+
+$('load').onclick = async () => {
+  try { await api('POST', '/wca/episode', { action: 'load', scenario: $('scenario').value }); refresh(); }
+  catch (e) { showError(e); }
+};
+$('reset').onclick = async () => {
+  try { await api('POST', '/wca/episode', { action: 'reset' }); refresh(); } catch (e) { showError(e); }
+};
+$('pause').onclick = async () => {
+  try { await api('POST', '/wca/clock', { action: state && state.paused ? 'resume' : 'pause' }); refresh(); }
+  catch (e) { showError(e); }
+};
+$('speed').onchange = async () => {
+  try { await api('POST', '/wca/clock', { action: 'speed', value: Number($('speed').value) }); refresh(); }
+  catch (e) { showError(e); }
+};
+for (const id of ['showGt', 'showEgo', 'showSigma', 'showMatch', 'showLabels']) $(id).onchange = () => state && drawMap();
+
+refresh().then(loadScenarios);
+setInterval(refresh, 500);
+setInterval(() => {
+  refreshCamera($('camOverview'), 'overview', 480, 360);
+  if (robotId) { refreshCamera($('camRobot'), `robot:${robotId}`, 320, 240); $('robotCamLabel').textContent = `${robotId} 头部相机`; }
+}, 1000);
+</script>
+</body>
+</html>

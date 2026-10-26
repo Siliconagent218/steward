@@ -1,10 +1,30 @@
 from __future__ import annotations
 
 import threading
+import time
 
 import pytest
 
 from steward.world.sim import WorldSim
+
+
+def test_running_clock_restarts_after_reset_and_does_not_jump_on_speed_change(kitchen_scene):
+    sim = WorldSim(kitchen_scene, speed=4.0)
+    sim.start()
+    try:
+        time.sleep(0.6)
+        assert sim.time > 1.5
+        sim.reset()
+        time.sleep(0.3)
+        assert sim.time < 1.6, "a reset must restart the clock instead of fast-forwarding to the old time"
+        sim.speed = 1.0
+        time.sleep(0.5)
+        before = sim.time
+        sim.speed = 8.0
+        time.sleep(0.25)
+        assert sim.time - before < 3.0, "raising the speed must not replay elapsed wall time"
+    finally:
+        sim.stop()
 
 
 def test_render_from_worker_thread_is_served_by_main_thread_pump(kitchen_scene):

@@ -98,6 +98,7 @@ class WorldSim:
         self.build.apply_initial(self.model, self.data)
         self.rng = np.random.default_rng(self._seed)
         self.robots = {e.id: _RobotState(e.id) for e in self.template.entities if e.role == "robot"}
+        self._epoch = getattr(self, "_epoch", 0) + 1
         self._renderers: dict[tuple[int, int], mujoco.Renderer] = {}
         self._body_entity: dict[int, str] = {}
         for eid, names in self.build.names.items():
@@ -117,7 +118,7 @@ class WorldSim:
     def reset(self) -> None:
         with self.lock:
             self._load(copy.deepcopy(self._initial_scene))
-            self.events.append({"t": 0.0, "type": "episode/reset"})
+            self.events = [{"t": 0.0, "type": "episode/reset"}]
 
     # --------------------------------------------------------------- stepping
     @property
@@ -152,18 +153,22 @@ class WorldSim:
             self._renderers.clear()
 
     def _loop(self) -> None:
-        wall0 = time.perf_counter()
-        sim0 = self.time
+        """Pace simulation time against wall time. The anchor is re-taken after a pause, a speed
+        change or a reset, so none of them makes the simulation jump forward."""
+        wall0, sim0, speed0, epoch0 = time.perf_counter(), self.time, self.speed, self._epoch
         while self._running:
+            with self.lock:
+                now_sim, epoch = self.time, self._epoch
+            if self.paused or self.speed != speed0 or epoch != epoch0:
+                wall0, sim0, speed0, epoch0 = time.perf_counter(), now_sim, self.speed, epoch
             if self.paused:
                 time.sleep(0.01)
-                wall0 = time.perf_counter()
-                sim0 = self.time
                 continue
-            target = sim0 + (time.perf_counter() - wall0) * self.speed
-            behind = target - self.time
+            behind = sim0 + (time.perf_counter() - wall0) * speed0 - now_sim
             if behind > self.timestep:
-                self.step(min(int(behind / self.timestep), 200))
+                with self.lock:
+                    if self._epoch == epoch0:
+                        self.step(min(int(behind / self.timestep), 200))
             else:
                 time.sleep(0.001)
 

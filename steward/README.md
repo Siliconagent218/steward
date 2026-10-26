@@ -7,6 +7,8 @@ Steward 是基于 DeepSeek Harness 的具身智能机器人系统。设计见仓
 ```sh
 uv sync
 .venv/bin/steward demo          # 构建厨房并运行「把杯子放到桌上」，按 World State 判定成败
+.venv/bin/steward up            # 常驻运行世界与机器人
+open http://127.0.0.1:7400/console   # 浏览器控制台：地图（真实状态 + 自我态）、相机、指标、控制
 ./scripts/check.sh              # Python 测试、DSH 插件编译与测试、组合配置快照比对
 ```
 

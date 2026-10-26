@@ -29,6 +29,7 @@ class Observer:
         self._lock = threading.Lock()
         self.latest: dict[str, dict] = {}
         self.history: dict[str, list[dict]] = {}
+        self.latest_ego: dict[str, dict] = {}
         if out_dir is not None:
             out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -61,6 +62,8 @@ class Observer:
             record["leak"] = errors[:5]
             self._store(robot_id, record)
             return record
+        with self._lock:
+            self.latest_ego[robot_id] = ego
         gt, robot_pose = self._ground_truth(robot_id)
         es_objs = [e for e in ego["entities"] if e["id"] != ego.get("self")]
         pairs = []
@@ -118,6 +121,13 @@ class Observer:
             if self.out_dir is not None:
                 with (self.out_dir / "observer.jsonl").open("a") as fh:
                     fh.write(json.dumps(record) + "\n")
+
+    def reset(self) -> None:
+        """Forget all records, for example when a new episode starts."""
+        with self._lock:
+            self.latest.clear()
+            self.history.clear()
+            self.latest_ego.clear()
 
     def report(self) -> dict:
         with self._lock:

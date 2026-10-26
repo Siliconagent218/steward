@@ -21,6 +21,7 @@ from typing import Any
 from steward.authoring.service import AuthoringError, AuthoringService
 from steward.net import Binary, HttpError, JsonServer
 from steward.observer.observer import Observer
+from steward.world.console import CONSOLE_HTML, console_state
 from steward.world.sim import WorldSim
 
 
@@ -56,6 +57,7 @@ class StewardHost:
             self.sim.stop()
         self.sim = WorldSim(scenario["sceneState"], speed=self.speed, seed=self.seed)
         self.scenario = scenario
+        self.observer.reset()
         for rid in scenario["robots"]:
             if rid not in self.robot_servers:
                 server = JsonServer(self._robot_routes(rid), port=self._robot_port_config.get(rid, 0), name=f"robot-{rid}")
@@ -140,6 +142,7 @@ class StewardHost:
             if action == "reset":
                 sim = self._require_sim()
                 self.on_main(sim.reset)
+                self.observer.reset()
                 return {"reset": True}
             raise HttpError(400, "action must be load or reset")
 
@@ -163,7 +166,13 @@ class StewardHost:
                 camera = sim.robot_camera_name(camera.removeprefix("robot:"))
             return Binary(sim.render(camera, int(q.get("width", 800)), int(q.get("height", 600))), "image/png")
 
+        def console_page(q, b):
+            return Binary(CONSOLE_HTML.read_bytes(), "text/html; charset=utf-8")
+
         return {
+            ("GET", "/"): console_page,
+            ("GET", "/console"): console_page,
+            ("GET", "/console/state"): guard(lambda q, b: console_state(self)),
             ("GET", "/wca/status"): guard(lambda q, b: {"scenario": (self.scenario or {}).get("name"),
                                                         **(self.sim.status() if self.sim else {"loaded": False})}),
             ("GET", "/wca/scene"): guard(lambda q, b: self._require_sim().world_state()),
