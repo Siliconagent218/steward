@@ -4,12 +4,12 @@
 
 Steward 是一个用于构建、仿真和观察通用机器人自主行为的系统。它由两部分组成：
 
-- **Steward 仿真与观察平面**：维护世界的 GT（Ground Truth，真实世界状态），模拟场景、物体与一个或多个机器人，为每个机器人渲染传感器输入，执行机器人发出的动作，并对比 GT 与各机器人的自我认知，评估其行为。
+- **Steward 仿真与观察平面**：维护世界的 GT（Ground Truth，真实世界状态），模拟场景、物体与一个或多个机器人，为每个机器人渲染传感器输入，执行机器人发出的动作，并对比 GT 与各机器人的自我认知，评估其行为。该平面包含一个 WH（World Harness，世界智能体），它是一个 DeepSeek Harness 实例，用于构建仿真资产、编排场景，并在仿真运行中交互式地引入动态变化，干扰机器人的行为条件。
 - **Ego 系统（机器人自我系统）**：每个机器人一套。它只通过自身传感器感知世界，持续维护一份局部且有误差的 ES（Ego-State，自我态），用 ESim（Ego-Simulation，自我仿真）预测动作后果，并用基于 DeepSeek Harness 的智能体完成长时任务规划（例如"准备一顿完整的晚餐"）、逐步身体控制和精细操作。
 
 Ego 系统是本项目的核心产物，目标是通用机器人。仿真环境中的传感器输入来自 Steward 渲染；部署到实体机器人时，同一套 Ego 系统改为接入真实相机与执行器，上层代码不变。
 
-本设计的硬性约束：**对 DeepSeek Harness 零侵入**。Steward 不修改、不 fork Harness 源码，只通过 Harness 公开的扩展点（插件、bundle、profile、patch、SDK）构建，从而持续获得上游新特性。
+本设计的硬性约束：**对 DeepSeek Harness 零侵入**。Steward 不修改任何上游文件，只通过 Harness 公开的扩展点（插件、bundle、profile、patch、SDK）构建，从而持续获得上游新特性。
 
 ## 2. 术语与缩写
 
@@ -21,6 +21,16 @@ Ego 系统是本项目的核心产物，目标是通用机器人。仿真环境�
 | WS | World State | 世界状态：场景、物体、机器人身体在某一时刻的完整物理状态。 |
 | GT | Ground Truth | 真实值。仿真中 WS 即 GT，仅 Steward 平面可读。 |
 | WSim | World Simulator | 世界仿真器：推进 WS 的物理引擎进程，是 GT 的唯一权威来源。 |
+| WH | World Harness | 世界智能体：Steward 平面中的 DeepSeek Harness 实例。负责资产构建、场景编排、运行中扰动注入、任务派发与评估。它可读 GT，但不在物理回路中。 |
+| WCA | World Control API | 世界控制接口：WSim 与 Sensor Renderer 对 WH 开放的受控操作集合（加载资产、施加扰动、管理触发器、控制时钟）。只在 Steward 平面内部可达。 |
+| Asset | Simulation Asset | 仿真资产：物体、家具、房间等的几何、碰撞体、物理参数、外观与语义描述。 |
+| Asset Library | Asset Library | 资产库：版本化、内容寻址的资产存储，供场景引用。 |
+| Scenario | Scenario | 一次实验的场景定义：环境、物体、机器人初始状态、任务、扰动策略、触发器与评估规则。 |
+| Perturbation | Perturbation | 扰动：仿真运行中对世界施加的变化（移动物体、开门、改变光照、引入行人、传感器故障等），用于干扰机器人的行为条件。 |
+| Trigger | Perturbation Trigger | 扰动触发器：由 WH 编写、由 WSim 每个 Tick 判定的条件规则，条件满足时施加指定扰动。 |
+| Perturbation Policy | Perturbation Policy | 扰动策略：Scenario 规定允许的扰动类型、合理性等级、幅度、频率与禁区。 |
+| Plausibility Level | Plausibility Level | 合理性等级：扰动在真实世界中发生的可能性分级，分为 physical、staged、god-mode，见 6.14。 |
+| Validation Receipt | Validation Receipt | WSim 对拟议扰动完成干运行校验后返回的凭据，WH 的守卫据此放行扰动。 |
 | Ego | Ego System | 机器人自我系统：一个机器人的感知、自我态、自我仿真、规划与控制的整体。 |
 | ES | Ego-State | 自我态：机器人仅凭自身感知重建的近似世界状态，包含自身身体状态。它是局部的（未见过的物体不在其中）且有误差的（位置估计有不确定度）。 |
 | ESim | Ego-Simulation | 自我仿真：机器人基于 ES 构建的内部物理模型，用于预测动作后果、做反事实推演。 |
@@ -29,13 +39,12 @@ Ego 系统是本项目的核心产物，目标是通用机器人。仿真环境�
 | EA | Ego Agent | 运行在 EH 中的智能体会话（Session）。 |
 | ES Error | Ego-State Error | ES 相对 GT 的误差，只能由 Steward 平面计算。 |
 | Observer | Observer | Steward 中只读采集 GT 与各机器人 ES 快照并计算指标的组件。 |
-| Scenario | Scenario | 一次实验的场景定义：环境、物体、机器人初始状态、任务、扰动与评估规则。 |
 | Episode | Episode | 一个 Scenario 的一次完整运行。 |
 | Tick | Tick | 仿真时钟的一个固定步长。 |
 | Skill | Skill | 可复用的中层动作能力，例如"抓取杯子""打开冰箱门"，由 ER 实时执行，EH 只负责选择与参数化。注意与 Harness 的 skill（指令文档）区分，后文称后者为 DSH Skill。 |
 | Belief | Belief | 概率意义上的状态估计，ES 中每个物体的位姿以均值和协方差表示。 |
 | Affordance | Affordance | 物体可被如何操作的属性，例如可抓取、可倾倒、易碎。 |
-| Prediction Receipt | Prediction Receipt | ESim 完成一次动作后果预测后返回的凭据，安全守卫据此放行动作。 |
+| Prediction Receipt | Prediction Receipt | ESim 完成一次动作后果预测后返回的凭据，EH 的安全守卫据此放行动作。 |
 
 ### 2.2 机器人与仿真技术缩写
 
@@ -57,6 +66,10 @@ Ego 系统是本项目的核心产物，目标是通用机器人。仿真环境�
 | HAL | Hardware Abstraction Layer | 硬件抽象层，屏蔽仿真传感器与真实传感器的差异。 |
 | Sim2Real | Simulation to Reality | 从仿真迁移到实体机器人。 |
 | MuJoCo | Multi-Joint dynamics with Contact | 开源刚体与接触动力学引擎，推荐作为 WSim 与 ESim 的物理内核。 |
+| MJCF | MuJoCo XML Format | MuJoCo 的模型描述格式，资产的主要物理描述格式。 |
+| mjSpec | MuJoCo model specification API | MuJoCo 的程序化模型编辑接口，可在运行时修改模型并重新编译，是运行中增删资产的候选实现方式。 |
+| URDF | Unified Robot Description Format | 常见的机器人描述格式，可转换为 MJCF。 |
+| GLB / OBJ / STL | — | 常见三维网格格式，用于资产的外观与碰撞几何。 |
 | MCAP | MCAP | 机器人领域常用的多通道时间序列日志格式。 |
 | RT | Real-Time | 实时，指有确定时限的控制回路。 |
 | IPC | Inter-Process Communication | 进程间通信。 |
@@ -95,13 +108,15 @@ Ego 系统是本项目的核心产物，目标是通用机器人。仿真环境�
 4. **长时任务**：能接受"准备一顿晚餐"这类多小时、多子目标的复杂指令，具备规划、执行、监控、重规划能力。
 5. **Sim2Real 一致**：同一套 Ego 系统可在仿真和实体机器人上运行，差异只在 HAL 层。
 6. **多机器人**：一个世界中可并存多个机器人，各自拥有独立 ES 与 EH。
-7. **上游兼容**：零侵入 DSH，随上游升级获得新能力。
+7. **可编程世界**：用 WH 以自然语言加代码的方式构建资产与场景，并在仿真运行中交互式或按条件注入扰动，系统性地检验机器人的鲁棒性。
+8. **上游兼容**：零侵入 DSH，随上游升级获得新能力。
 
 ### 3.2 非目标
 
-- 不把 LLM 放进实时控制回路；EH 不直接输出电机指令。
+- 不把 LLM 放进任何实时回路：EH 不直接输出电机指令，WH 不直接推进物理步进。
 - 不修改 DSH 的 agent loop、会话格式或任何上游包。
 - 不让 Steward 为机器人"代为感知"；Steward 只提供传感器原始数据（图像、深度、IMU、关节编码器等）。
+- 不向机器人预告扰动；机器人只能通过自己的传感器发现世界的变化。
 
 ## 4. 核心概念
 
@@ -109,12 +124,14 @@ Ego 系统是本项目的核心产物，目标是通用机器人。仿真环境�
 
 ```mermaid
 flowchart LR
+  WH["WH<br/>构建资产 / 注入扰动"]
   GT["WS / GT<br/>完整且精确<br/>仅 Steward 可读"]
   S["传感器数据<br/>视角受限 + 噪声"]
   ES["ES<br/>局部 + 有误差<br/>机器人自有"]
   ESim["ESim<br/>基于 ES 的预测模型"]
   ACT["动作"]
 
+  WH -- "WCA" --> GT
   GT -- "渲染 / 采样" --> S
   S -- "感知 + 状态估计" --> ES
   ES -- "构建" --> ESim
@@ -129,7 +146,9 @@ ES 与 GT 有三类差异，Steward 分别度量：
 |---|---|---|
 | 覆盖缺失 | 未见过的物体、未探索的空间不在 ES 中 | 物体召回率、已探索空间比例 |
 | 估计误差 | 已知物体的位姿、尺寸、类别有偏差 | 位置误差（米）、姿态误差（度）、类别准确率 |
-| 过时状态 | 物体被他人移动后 ES 尚未更新 | 状态陈旧时间、错误持有率 |
+| 过时状态 | 物体被他人或扰动移动后 ES 尚未更新 | 状态陈旧时间、扰动发现延迟 |
+
+WH 注入的扰动专门制造第三类差异：世界变了，机器人必须自己发现。
 
 ### 4.2 ES 数据模型
 
@@ -180,18 +199,17 @@ ESim 的输出是 Prediction Receipt，包含预测 id、所依据的 ES 版本�
 
 ### 4.4 分层控制与时间尺度
 
-LLM 推理以秒计，电机控制以毫秒计。系统必须分层，并保证上层延迟不会阻塞下层：
+LLM 推理以秒计，电机控制以毫秒计。系统必须分层，并保证上层延迟不会阻塞下层。世界侧与机器人侧采用同一原则：**智能体负责意图，实时进程负责执行**。
 
-| 层级 | 职责 | 频率 / 时间尺度 | 承载者 |
-|---|---|---|---|
-| L4 任务规划 | 理解指令、分解目标、长时计划、重规划 | 分钟到小时 | EH（DSH 智能体） |
-| L3 技能编排 | 选择下一个 Skill 并参数化，监控结果 | 约 1 秒到数十秒 | EH 工具调用 |
-| L2 运动规划与预测 | 轨迹规划、ESim 推演、风险评估 | 1–10 Hz | ER |
-| L1 技能策略 | MPC、IK、WBC、VLA 策略 | 10–100 Hz | ER |
-| L0 伺服 | 关节位置 / 力矩闭环 | 500 Hz–1 kHz | ER 或电机驱动器 |
-| 感知与 ES 更新 | 检测、跟踪、滤波、建图 | 10–30 Hz | ER |
+| 层级 | 机器人侧职责 | 世界侧职责 | 时间尺度 | 承载者 |
+|---|---|---|---|---|
+| 智能体层 | 任务理解、长时计划、技能编排 | 资产构建、场景编排、设计扰动与触发器 | 秒到小时 | EH / WH（DSH） |
+| 规划与校验层 | 轨迹规划、ESim 推演 | 扰动干运行校验、触发条件判定 | 1–10 Hz 或每 Tick | ER / WSim |
+| 执行层 | 技能策略（MPC、IK、WBC、VLA） | 施加扰动、驱动动态实体（行人、宠物） | 10–100 Hz | ER / WSim |
+| 伺服 / 物理层 | 关节伺服 | 物理步进 | 500 Hz–1 kHz | ER / WSim |
+| 感知层 | 检测、跟踪、滤波、建图 | 传感器渲染 | 10–30 Hz | ER / Renderer |
 
-原则：EH 只下达"目标与约束"，不下达轨迹点。EH 卡住、断线或升级重启时，ER 依然能维持安全姿态（保持、减速、停止）。
+原则：EH 只下达目标与约束，不下达轨迹点；WH 只下达扰动意图与触发条件，不参与物理步进。任一智能体卡住、断线或升级重启，实时进程照常运行。
 
 ## 5. 系统总体架构
 
@@ -201,23 +219,29 @@ LLM 推理以秒计，电机控制以毫秒计。系统必须分层，并保证�
 flowchart TB
   subgraph STEWARD["Steward 仿真与观察平面（可读 GT）"]
     direction TB
-    SCN["Scenario Manager<br/>场景 / 任务 / 扰动"]
+    WH["WH（World Harness）<br/>dsh --profile world<br/>资产构建 / 场景编排 / 扰动注入 / 任务派发 / 评估"]
+    LIB["Asset Library<br/>版本化资产库"]
+    VAL["Asset Validator<br/>独立 MuJoCo 实例"]
+    WCA["World Control API"]
     CLK["Sim Clock<br/>实时 / 倍速 / 步进"]
-    WSIM["WSim<br/>MuJoCo 世界物理<br/>GT 唯一来源"]
-    REN["Sensor Renderer<br/>按机器人视角渲染<br/>RGB / Depth / IMU / 编码器 + 噪声模型"]
-    OBS["Observer & Evaluator<br/>GT vs ES 误差、任务 KPI、事故检测"]
+    WSIM["WSim<br/>MuJoCo 世界物理<br/>GT 唯一来源<br/>触发器按 Tick 判定"]
+    REN["Sensor Renderer<br/>按机器人视角渲染<br/>RGB / Depth / IMU / 编码器 + 噪声与故障模型"]
+    OBS["Observer & Evaluator<br/>GT vs ES 误差、任务 KPI、扰动响应、事故检测"]
     REC["Recorder<br/>MCAP + 会话日志对齐"]
-    CON["Steward Console<br/>3D 可视化 / 回放"]
-    DIR["Steward Director（可选）<br/>DSH 实例：自然语言建场景、派发任务、写评估报告"]
-    SCN --> WSIM
+
+    WH -- "读写资产" --> LIB
+    WH -- "资产校验" --> VAL
+    WH -- "资产加载 / 扰动 / 触发器 / 时钟" --> WCA
+    WCA --> WSIM
+    WCA --> REN
+    WCA --> CLK
+    LIB --> WSIM
     CLK --> WSIM
     WSIM --> REN
     WSIM --> OBS
-    OBS --> REC
     WSIM --> REC
-    REC --> CON
-    DIR -. "Steward API 工具" .-> SCN
-    DIR -. "读取 KPI" .-> OBS
+    OBS --> REC
+    OBS -. "KPI" .-> WH
   end
 
   subgraph R1["Robot 1：Ego 系统（不可读 GT）"]
@@ -241,8 +265,9 @@ flowchart TB
   ER1 -. "遥测通道（单向只读 ES 快照）" .-> OBS
   ERN -. "遥测通道" .-> OBS
 
-  USER["操作者 / 测试脚本"] -- "指令通道（DSH SDK）" --> EH1
-  DIR -. "指令通道（DSH SDK）" .-> EHN
+  USER["实验员（Web UI / Desktop）"] -- "对话：建资产、改世界" --> WH
+  USER -- "指令通道（DSH SDK / UI）" --> EH1
+  WH -. "指令通道（DSH SDK，受 Scenario 内容规则约束）" .-> EHN
 ```
 
 ### 5.2 通道定义
@@ -253,17 +278,17 @@ flowchart TB
 |---|---|---|---|---|
 | 传感器通道 | 世界 → ER | 图像、深度、IMU、关节编码器、力 / 触觉 | Sensor Renderer 渲染 | 真实传感器驱动 |
 | 执行器通道 | ER → 世界 | 关节目标、力矩、夹爪指令 | WSim 执行器输入 | 电机驱动器 |
-| 指令通道 | 操作者 → EH | 自然语言任务、追加指令、中止 | DSH SDK（TS 或 Python） | 同左，或 Web / Desktop UI |
+| 指令通道 | 实验员或 WH → EH | 自然语言任务、追加指令、中止 | DSH SDK（TS 或 Python）或 UI | 同左 |
 | 遥测通道 | ER → Observer | ES 快照、动作事件、ESim 预测 | 单向推送 | 可选，用于远程监控 |
 | 机器人间通信（可选） | ER ↔ ER | 显式消息 | 经 Steward 模拟的无线信道（可加延迟、丢包） | 真实网络 |
-| 控制通道 | Steward 内部 | 场景加载、时钟、扰动注入 | 内部 API | 不存在 |
+| 世界控制通道（WCA） | WH → WSim / Renderer / Clock | 资产加载、扰动、触发器、时钟、Episode 控制 | Steward 内部 gRPC | 不存在 |
 
 隔离规则：
 
-- ER 与 EH 的网络命名空间中不存在任何可访问 WSim 状态查询接口的路由或凭据。
+- ER 与 EH 的网络命名空间中不存在任何可访问 WCA 或 WSim 状态查询接口的路由或凭据。
 - 遥测通道单向：Observer 只接收，不回写任何信息给机器人。
 - 机器人之间不共享 ES 存储；协作只能经显式消息。
-- Steward Director 只能经指令通道与机器人交互，不得把 GT 内容放进指令。Scenario 可以规定任务文本中允许出现的信息。
+- WH 可读 GT，因此它与机器人只能经指令通道交互；指令内容受 Scenario 的内容规则约束，不得包含 GT 信息，也不得预告扰动。WH 的会话日志含 GT，存放在 Steward 平面，永不提供给 EH。
 
 ### 5.3 时钟模式
 
@@ -273,7 +298,7 @@ flowchart TB
 | 倍速 | 以固定倍率推进 | 加速长任务，但需确保 ER 实时回路跟得上 |
 | 步进（lockstep） | WSim 每个 Tick 等待所有 ER 确认后再推进；EH 思考时间可选择计入或冻结 | 可复现实验、回归测试、调试 |
 
-所有通道消息都携带仿真时间戳。ER 内部统一使用"当前时钟源"抽象：仿真中读 Sim Clock，实体机器人上读系统单调时钟。
+所有通道消息都携带仿真时间戳。ER 内部统一使用"当前时钟源"抽象：仿真中读 Sim Clock，实体机器人上读系统单调时钟。WH 可通过 WCA 暂停、继续、改变倍率，但默认不因自身思考而暂停世界；需要"冻结世界后再改"时须显式调用暂停。
 
 ## 6. 软件架构与 DeepSeek Harness 的关系
 
@@ -281,10 +306,17 @@ flowchart TB
 
 | 组件 | 是否使用 DSH | 实例数 | 理由 |
 |---|---|---|---|
-| WSim / Renderer / Observer / Recorder | **否** | — | 它们是确定性的仿真与数据处理服务，不是智能体。放进 DSH 的回合式 agent loop 既无收益，又会把实时物理与 LLM 延迟耦合在一起。使用独立进程（Python / C++ + MuJoCo）。 |
-| Steward Director | 可选，是 | 0 或 1 | 当需要用自然语言生成场景、批量派发任务、阅读日志写评估报告时，作为一个普通 DSH 智能体，通过工具调用 Steward API。它是"实验员"，不是世界本身。 |
+| WSim / Renderer / Observer / Recorder | **否** | 每个世界一组 | 确定性的仿真与数据服务，必须以固定步长实时运行，不能被 LLM 延迟阻塞。使用独立进程（Python / C++ + MuJoCo）。 |
+| World Harness（WH） | **是** | **每个世界 1 个** | 世界的"布景师与导演"：用 DSH 的对话、编码、文件、shell、图像理解与多智能体能力构建资产，并在运行中交互式改变世界。它通过 WCA 操作 WSim，自身不在物理回路中。 |
 | Ego Harness（EH） | **是** | **每个机器人 1 个** | 见下文。 |
 | Ego Runtime（ER） | 否 | 每个机器人 1 个 | 实时回路不进入 DSH。 |
+
+**为什么 WSim 要配一个 WH，而不是把 WSim 做成 DSH 插件：**
+
+1. **资产构建本质上是智能体工作**：根据描述或参考图生成 MJCF、编写程序化生成脚本、导入网格并生成碰撞体、调物理参数、看预览图迭代。这正是 DSH 已有的编码智能体能力（文件、shell、图像附件、subagent、DSH Skill），无需自建。
+2. **交互式扰动需要自然语言接口**：实验员可以说"当机器人端着汤经过走廊时，把椅子推到走廊中间"，由 WH 把它翻译为触发器和扰动参数。
+3. **物理仍需实时确定**：WH 只产生意图（扰动、触发器、资产），WSim 在 Tick 边界原子地执行。WH 卡住或重启，世界照常运行。
+4. **职责合并**：原先设想的独立"Steward Director"（任务派发、评估报告）并入 WH，以不同 Agent Preset 区分角色，避免多一个同样可读 GT 的实例。
 
 **为什么每个机器人一个独立的 DSH 实例，而不是一个 DSH 进程里跑多个智能体：**
 
@@ -294,7 +326,9 @@ flowchart TB
 4. **会话日志即机器人"黑匣子"**：每个机器人的完整决策过程在自己的 Session 日志中，可单独回放与审计。
 5. **独立配置**：不同型号的机器人（双臂、移动底盘、人形）可加载不同 bundle 与 preset。
 
-单个 EH 内部仍可使用多智能体：主会话负责任务规划，Subagent 负责子任务（例如"检查冰箱里有哪些食材"），Agent Preset 为不同角色配置不同工具集。这些都是同一机器人"大脑"内部的分工，共享该机器人的 ES，不违反隔离。
+WH 与 EH 绝不合并到同一进程：前者可读 GT，后者必须不可读。
+
+单个 EH 或 WH 内部仍可使用多智能体：主会话负责规划，Subagent 负责子任务，Agent Preset 为不同角色配置不同工具集。这些都是同一个"大脑"内部的分工，不违反隔离。
 
 ### 6.2 进程与部署拓扑
 
@@ -302,11 +336,15 @@ flowchart TB
 flowchart LR
   subgraph SIMHOST["仿真模式：单机或集群"]
     direction TB
-    subgraph SP["Steward 进程组"]
+    subgraph SP["Steward 进程组（可读 GT）"]
       W["WSim"]
       RD["Renderer（GPU）"]
       O["Observer"]
       RC["Recorder"]
+      WHI["WH：dsh --profile world<br/>DSH_HOME=/data/world"]
+      AL["Asset Library + Validator"]
+      WHI --> W
+      WHI --> AL
     end
     subgraph RB1["robot-1 容器"]
       E1["ER"]
@@ -330,7 +368,7 @@ flowchart LR
   end
 ```
 
-建议每个机器人放在独立容器或虚拟机中，用网络策略落实 5.2 的隔离规则。实体模式下 Steward 平面不存在；若有动作捕捉系统，可作为近似 GT 接入 Observer，用于真实环境评估。
+建议每个机器人放在独立容器或虚拟机中，用网络策略落实 5.2 的隔离规则。实体模式下 Steward 平面和 WH 都不存在；若有动作捕捉系统，可作为近似 GT 接入 Observer，用于真实环境评估。
 
 ### 6.3 Ego Harness 插件组成
 
@@ -343,7 +381,7 @@ flowchart TB
     APP["dsh-sdk-app<br/>SDK JSON-RPC 服务"]
   end
 
-  subgraph ST["Steward（npm：@steward/*，自有仓库）"]
+  subgraph ST["Steward（@steward/*）"]
     BUNDLE["@steward/dsh-bundle-ego<br/>dsh.bundle → cordis.patch.yml"]
     DEF["@steward/dsh-ego<br/>Service Definition：ctx.ego"]
     PROV["@steward/dsh-ego-runtime-client<br/>Service Provider：经 gRPC 连接 ER"]
@@ -400,7 +438,7 @@ Bundle 的 `package.json` 声明：
 | Service Provider（测试） | `@steward/dsh-ego-fake` | 脚本化 ER，用于无仿真环境的单元测试与会话快照测试。 |
 | Consumer | `@steward/dsh-tool-ego` 等 | 模型工具、安全守卫、上下文注入、UI 插件。只依赖 Service Definition，从不依赖具体 Provider。 |
 
-### 6.5 模型工具设计
+### 6.5 EH 模型工具设计
 
 工具面向模型的视角描述任务概念，不暴露传输与实现细节：
 
@@ -416,7 +454,7 @@ Bundle 的 `package.json` 声明：
 
 图像只在模型需要时按需返回，不把连续视频流塞进上下文；连续感知由 ER 在 ES 中消化，模型主要读结构化 ES 摘要，从而控制 token 与 KV-cache 开销。
 
-### 6.6 安全守卫
+### 6.6 EH 安全守卫
 
 安全分两层，互相独立：
 
@@ -433,7 +471,7 @@ Bundle 的 `package.json` 声明：
 
 ### 6.7 会话日志与"模型可见即已记录"
 
-DSH 要求模型看到的一切都能从会话日志重建。Steward 遵循这一规则：
+DSH 要求模型看到的一切都能从会话日志重建。EH 与 WH 都遵循这一规则：
 
 - `@steward/dsh-ego-context` 在每次模型请求前通过 `agent.inject()` 注入 ES 增量摘要（新发现的物体、显著变化、执行中的 Skill 状态）。该内容进入日志，回放时可重建。
 - `@steward/dsh-ego-events` 通过 `SessionEventMap` 声明合并增加仅日志事件（不进入模型历史）：
@@ -447,13 +485,14 @@ DSH 要求模型看到的一切都能从会话日志重建。Steward 遵循这�
 | `robot/safety-veto` | 守卫否决及原因 |
 
 - 原始传感器数据和完整 ES 不写入 DSH 会话（体积过大），只记录引用；完整数据由 Recorder 以 MCAP 保存。
+- WH 侧的事件见 6.15。
 
 ### 6.8 长时任务：以"准备一顿晚餐"为例
 
 ```mermaid
 sequenceDiagram
   autonumber
-  actor U as 操作者
+  actor U as 实验员
   participant EH as EH（DSH 智能体）
   participant G as 安全守卫
   participant ER as ER
@@ -536,63 +575,259 @@ ES 的持续收敛来自 State Estimator：每帧观测与已有 belief 融合�
 | Actuator HAL | `SimActuatorSink`（接 WSim） | `RealMotorDriver` | 换实现，接口不变 |
 | 时钟源 | Sim Clock | 系统单调时钟 | 配置切换 |
 | 感知、估计、ESim、规划、执行 | 同一代码 | 同一代码 | 否（模型参数可单独标定） |
-| EH 与全部 DSH 插件 | 同一 bundle | 同一 bundle | 否；仅 profile patch 调整阈值 |
-| Steward 平面 | 存在 | 不存在（可选动作捕捉作为近似 GT） | — |
+| EH 与全部 EH 插件 | 同一 bundle | 同一 bundle | 否；仅 profile patch 调整阈值 |
+| Steward 平面与 WH | 存在 | 不存在（可选动作捕捉作为近似 GT） | — |
+
+### 6.11 World Harness 插件组成
+
+WH 是另一个自定义 DSH profile，从上游 `web` 模板派生，以便实验员在浏览器中与它对话并查看世界视图：
+
+```mermaid
+flowchart TB
+  subgraph UPW["上游（npm：@deepseek-ai/*，只读、锁定版本）"]
+    WBASE["dsh-base<br/>模型、文件、shell、沙箱、subagent、<br/>压缩、图像附件、DSH Skill…"]
+    WAPP["dsh-web-app<br/>浏览器应用"]
+  end
+
+  subgraph STW["Steward（@steward/*）"]
+    WBUNDLE["@steward/dsh-bundle-world"]
+    WDEF["@steward/dsh-world<br/>Service Definition：ctx.world"]
+    WPROV["@steward/dsh-world-client<br/>Service Provider：经 gRPC 连接 WCA"]
+    WFAKE["@steward/dsh-world-fake<br/>Service Provider：测试用"]
+    WAT["@steward/dsh-tool-world-assets<br/>资产与场景工具"]
+    WPT["@steward/dsh-tool-world-runtime<br/>扰动 / 触发器 / 时钟 / Episode / 任务派发"]
+    WPOL["@steward/dsh-world-policy<br/>扰动策略守卫"]
+    WEVT["@steward/dsh-world-events<br/>SessionEventMap 扩展"]
+    WPRE["@steward/dsh-world-presets<br/>asset-builder / scene-director / perturber / evaluator"]
+    WSKL["@steward/dsh-skills-world<br/>DSH Skill：MJCF 规范、资产质量标准、扰动设计"]
+    WUI["@steward/client-ui-world<br/>3D 视图、扰动时间线、KPI 面板"]
+  end
+
+  WBASE --> WAPP --> WBUNDLE
+  WBUNDLE --> WDEF & WPROV & WAT & WPT & WPOL & WEVT & WPRE & WSKL & WUI
+  WPROV -. 实现 .-> WDEF
+  WFAKE -. 实现 .-> WDEF
+  WAT -. 使用 .-> WDEF
+  WPT -. 使用 .-> WDEF
+  WPOL -. 使用 .-> WDEF
+```
+
+```sh
+dsh --profile world --from-default-profile web --dump-default-config >/dev/null
+dsh plugin --profile world add @steward/dsh-bundle-world
+dsh --profile world   # 启动浏览器界面
+```
+
+`ctx.world` seam：
+
+| 角色 | 包 | 职责 |
+|---|---|---|
+| Service Definition | `@steward/dsh-world` | 定义资产库访问、资产校验、场景加载、扰动校验与施加、触发器管理、时钟与 Episode 控制、GT 摘要读取、KPI 读取。 |
+| Service Provider | `@steward/dsh-world-client` | 经 gRPC 连接 WCA；端点等为 `Config` 字段。 |
+| Service Provider（测试） | `@steward/dsh-world-fake` | 内存中的假世界，用于无仿真测试。 |
+| Consumer | 工具、守卫、UI 插件 | 只依赖 Service Definition。 |
+
+预设角色（Agent Preset）：
+
+| Preset | 职责 | 主要工具 |
+|---|---|---|
+| `asset-builder` | 生成、导入、修正、验证资产 | 资产工具 + 上游文件 / shell 工具（限定在资产工作区） |
+| `scene-director` | 布置场景、编写 Scenario、派发任务 | 场景工具、`task_dispatch` |
+| `perturber` | 交互式或按计划注入扰动、编写触发器 | 运行时扰动工具 |
+| `evaluator` | 读取 KPI 与回放，生成评估报告 | `kpi_read`、回放摘要 |
+
+### 6.12 资产构建流程
+
+```mermaid
+flowchart LR
+  IN["输入<br/>文字描述 / 参考图片 / 网格文件 / URDF"]
+  AB["WH：asset-builder<br/>编写 MJCF 或程序化生成脚本<br/>设置物理参数与语义标签"]
+  VAL["asset_validate<br/>独立 MuJoCo 实例：编译、跌落测试、<br/>惯量与碰撞体检查、穿透检查"]
+  PV["asset_preview<br/>多视角渲染，图像返回给 WH"]
+  FIX{"通过？"}
+  PUB["asset_publish<br/>写入 Asset Library（内容寻址 + 版本）"]
+  SC["scene_compose<br/>布置房间与物体"]
+  SCN["scenario_save<br/>场景 + 任务 + 扰动策略 + 触发器"]
+
+  IN --> AB --> VAL --> PV --> FIX
+  FIX -- "否：根据报告与预览修改" --> AB
+  FIX -- "是" --> PUB --> SC --> SCN
+```
+
+资产工具：
+
+| 工具 | 作用 |
+|---|---|
+| `asset_search` | 按类别、标签、尺寸检索资产库 |
+| `asset_create` | 由描述或参数生成资产（程序化几何、参数化家具），或导入网格并生成碰撞体 |
+| `asset_edit` | 修改尺寸、材质、物理参数、语义标签 |
+| `asset_validate` | 在独立的校验用 MuJoCo 实例中编译并做物理检查，返回结构化报告 |
+| `asset_preview` | 渲染多视角预览图，以图像附件返回 |
+| `asset_publish` | 写入资产库并生成新版本 |
+| `scene_compose` | 布置房间、家具与物体，生成场景 |
+| `scenario_save` | 保存完整 Scenario |
+
+资产结构：
+
+| 部分 | 内容 | 谁可见 |
+|---|---|---|
+| 物理描述 | MJCF 片段、碰撞体、质量、惯量、摩擦、关节 | WSim |
+| 外观 | 网格、材质、纹理 | WSim、Renderer |
+| 语义 | 类别、affordance、易碎阈值、"可被推倒"等标签 | Observer、Renderer 的分割通道；**不发给机器人** |
+| 元数据 | 来源、生成脚本、校验报告、版本、内容哈希 | WH、Recorder |
+
+资产构建复用上游 DSH 的编码智能体能力：WH 用上游文件与 shell 工具在资产工作区中编写 MJCF 和 Python 生成脚本，并用上游沙箱把写入范围限制在该工作区内。WH 编写的生成脚本本身也是资产的一部分，便于批量生成变体（不同尺寸的桌子、随机摆放的餐具）。
+
+### 6.13 交互式动态扰动
+
+WH 在仿真运行中有两种施加扰动的方式：
+
+1. **即时扰动**：实验员在 Web UI 中对 WH 说"现在把厨房灯关掉"，WH 校验后立即施加。
+2. **条件触发**：实验员说"当机器人端着汤经过走廊时，把椅子推到走廊中间"。WH 把它编写为触发器交给 WSim，由 WSim 在每个 Tick 判定条件，满足时原子地施加。LLM 延迟不会让扰动错过时机，结果也可复现。
+
+```mermaid
+sequenceDiagram
+  autonumber
+  actor U as 实验员
+  participant WH as WH（DSH 智能体）
+  participant P as 扰动策略守卫
+  participant W as WSim
+  participant R as Renderer
+  participant ER as Robot ER
+  participant EH as Robot EH
+  participant O as Observer
+
+  U->>WH: "当机器人端着汤经过走廊时，把椅子推到走廊中间"
+  WH->>W: world_status（走廊区域、椅子、机器人状态）
+  WH->>W: world_validate_change（触发条件 + 推椅子，physical 等级）
+  W-->>WH: Validation Receipt #7：无穿透，椅子路径可达
+  WH->>P: world_trigger_create（Receipt #7）
+  P-->>WH: 放行（在扰动预算内）
+  WH->>W: 注册触发器
+  loop 每个 Tick
+    W->>W: 判定条件
+  end
+  W->>W: 条件满足，原子施加：对椅子施加推力
+  W->>O: 扰动事件（时间戳、参数）
+  W->>R: 新世界状态
+  R->>ER: 传感器数据中出现被移动的椅子
+  ER->>ER: ES 更新（椅子位置变化）
+  ER-->>EH: ES 摘要：前方新障碍
+  EH->>EH: 重新规划路径
+  O->>O: 记录发现延迟、重规划延迟、是否碰撞 / 洒汤
+  WH-->>U: 触发报告与机器人响应 KPI
+```
+
+运行时工具：
+
+| 工具 | 作用 |
+|---|---|
+| `world_status` | 读取 GT 摘要：仿真时间、各区域物体、各机器人位置与状态 |
+| `world_validate_change` | 对拟议扰动或触发器做干运行校验，返回 Validation Receipt |
+| `world_perturb` | 立即施加扰动（需有效 receipt） |
+| `world_trigger_create` / `world_trigger_list` / `world_trigger_cancel` | 管理条件触发扰动 |
+| `world_clock` | 暂停、继续、倍速、步进 |
+| `episode_control` | 加载 Scenario、开始 / 结束 / 重置 Episode |
+| `task_dispatch` | 经指令通道向某机器人发任务（受 Scenario 内容规则约束） |
+| `kpi_read` | 读取 Observer 指标与扰动响应统计 |
+
+运行中增删资产的实现方式由 WSim 决定，候选方案有两种：用 MuJoCo mjSpec 修改模型后重新编译并保留仿真状态；或在 Episode 开始时预置不激活的物体池，扰动时激活。两者对 WH 透明，都通过 WCA 的同一操作暴露。
+
+### 6.14 扰动类型、合理性等级与策略守卫
+
+合理性等级：
+
+| 等级 | 含义 | 实现方式 | Observer 标记 |
+|---|---|---|---|
+| physical | 真实世界中可能自然发生，且遵守物理 | 通过力、运动学或模拟的人 / 宠物施加，不允许穿透和瞬移 | 正常评估 |
+| staged | 真实世界中可能发生，但发生机制被抽象 | 直接修改参数（摩擦、质量、传感器噪声、关节力矩上限） | 正常评估，注明机制已抽象 |
+| god-mode | 非物理变化 | 瞬移、凭空出现或消失 | 单独统计，仅用于压力测试 |
+
+扰动类别：
+
+| 类别 | 示例 | 典型等级 |
+|---|---|---|
+| 物体放置 | 新增、移除、移动物体；把杯子挪到桌沿 | physical / god-mode |
+| 关节状态 | 开关门、抽屉、冰箱 | physical |
+| 物理属性 | 地面变滑、杯子变重、易碎阈值降低 | staged |
+| 动态实体 | 行人穿过、宠物乱跑、球滚过 | physical |
+| 环境 | 关灯、强光、烟雾 | physical |
+| 传感器条件 | 镜头污渍、遮挡、噪声增大、延迟、丢帧 | staged（在 Renderer 中实现） |
+| 机器人本体故障 | 某关节力矩下降、夹爪打滑 | staged（在 WSim 的执行器模型中实现） |
+| 通信 | 机器人间消息延迟、丢包 | staged |
+
+扰动策略守卫 `@steward/dsh-world-policy`：
+
+- 在 `tools/pre-execute` 中检查：扰动必须携带有效 Validation Receipt；类型与合理性等级在 Scenario 的 Perturbation Policy 允许范围内；不超过扰动预算（次数、频率、幅度）；不落在禁区（例如不在机器人身体内生成物体，不对正在执行精细操作的机械臂直接施力，除非 Scenario 明确允许）。
+- 用 `ctx.tools.guard()` 注册最终否决。
+- 触发器在 WSim 中执行时，WSim 再按同一策略做一次运行时校验，因为触发时的世界状态可能已与创建时不同；校验失败的触发记录为"已跳过"及原因，不会静默丢弃。
+- 策略参数是 bundle 配置字段，也可由 Scenario 覆盖。
+
+### 6.15 WH 的日志、复现与隔离
+
+- `@steward/dsh-world-events` 增加仅日志事件：`world/asset-published`、`world/scenario-saved`、`world/perturbation-applied`、`world/trigger-created`、`world/trigger-fired`、`world/trigger-skipped`、`world/episode`。
+- WSim 的事件流是扰动的权威记录；WH 会话事件记录"谁在何时、出于何种意图提出了扰动"。二者通过 Validation Receipt id 关联。
+- **可复现**：Scenario 加上扰动事件序列构成回放脚本。重放时不需要 WH 参与，WSim 按时间戳或触发器重新施加即可，因此同一组扰动可以用来对比不同版本的 Ego 系统。
+- **隔离**：WH 会话日志与 Asset Library 中的语义标签含 GT 信息，只存放在 Steward 平面；WH 不经任何通道向机器人透露扰动或 GT。
 
 ## 7. 防止与上游分叉的原则
 
-这是本设计的硬约束。目标是：上游每次发布后，Steward 只需"升级版本号 + 跑兼容测试"，而不是合并代码。
+这是本设计的硬约束。目标是：上游每次发布后，Steward 只需"升级版本号或同步上游 + 跑兼容测试"，而不是解决代码冲突。EH 与 WH 遵循同一套原则。
 
-### P1 零侵入，独立仓库
+### P1 零侵入：只增不改
 
-- Steward 是独立仓库，以 npm 依赖方式使用 `@deepseek-ai/dsh` 及相关包，**锁定精确版本**。
-- 不 fork、不 vendor、不打补丁到 `packages/`、`vendor/` 或任何上游文件，也不依赖上游仓库的内部路径或未导出模块。
-- 本地克隆的上游仓库只用于阅读源码和运行上游自身的检查。
+Steward 仓库 [hengliao1972/steward](https://github.com/hengliao1972/steward) 是官方仓库的 GitHub fork，`upstream` 远程指向官方主线，只用于拉取。
+
+- **只新增、不修改**：Steward 的全部代码与文档位于 fork 中新增的目录（`steward/`）和根目录的 `steward.md`。任何上游已有文件都不修改，因此合并上游时不会产生冲突。
+- **独立工作区**：`steward/` 是独立的 pnpm 工作区，不加入根目录工作区；不修改根目录的 `package.json`、`pnpm-workspace.yaml`、CI 配置或上游的检查脚本，也不受上游仓库检查规则的约束。
+- **默认依赖已发布版本**：Steward 包以 npm 依赖方式使用 `@deepseek-ai/*`，锁定精确版本。fork 中的上游源码用于阅读、本地运行上游自身检查和 canary 测试（见 P8），不作为 Steward 的直接构建来源。
+- 不依赖上游未导出的模块、内部路径或会话文件的物理格式。
 
 ### P2 只使用文档化扩展点
 
 | Steward 需求 | 上游扩展点 |
 |---|---|
 | 模型工具 | 在 `ctx.tools` 注册 |
-| 机器人能力接口 | 自定义 Capability Seam（`ctx.ego`） |
-| 动作审批与否决 | `tools/pre-execute`、`ctx.tools.guard()` |
+| 机器人与世界能力接口 | 自定义 Capability Seam（`ctx.ego`、`ctx.world`） |
+| 动作与扰动审批、否决 | `tools/pre-execute`、`ctx.tools.guard()` |
 | 急停与人类命令 | `ctx.commands` |
-| 向模型注入 ES 上下文 | `agent.inject()` |
+| 向模型注入上下文 | `agent.inject()` |
 | 持久化自有状态 | `SessionEventMap` 声明合并（仅日志事件） |
 | 角色与能力组合 | Agent Preset |
 | UI | 读取 `session/event` 的客户端插件、Chat 节点注册 |
 | 外部驱动 | DSH SDK（TS / Python） |
 | 组合与配置 | profile + bundle + patch |
+| 资产编写 | 上游文件、shell、沙箱工具 |
 
 现有扩展点不够用时，**不绕过**，而是向上游提 issue / PR 请求新的扩展点；在上游合入前，用自有插件实现最小替代方案并登记在"兼容性登记表"中，上游能力可用后立即迁移。
 
 ### P3 只经 profile 启动
 
-上游规定受支持的 Node 应用只能通过命名 `dsh` profile 启动。Steward 不发布自定义可执行文件，不直接在进程内挂载插件树：EH 一律以 `dsh --profile ego` 运行，测试脚本与 Steward Director 经 SDK 启动它。
+上游规定受支持的 Node 应用只能通过命名 `dsh` profile 启动。Steward 不发布自定义可执行文件，不直接在进程内挂载插件树：EH 以 `dsh --profile ego` 运行，WH 以 `dsh --profile world` 运行，测试脚本经 SDK 启动它们。
 
 ### P4 组合优先于复制
 
-- EH profile 从上游模板派生，以 bundle 叠加 Steward 能力，不复制上游配置树。这样上游在 `dsh-base` 中新增或改进的通用能力（模型适配、压缩、持久化、subagent 等）自动生效。
-- 需要关闭的上游能力用 patch 按行 id 覆盖，并在 bundle 文档中写明原因（例如机器人 profile 禁用不需要的浏览器工具）。
-- 副作用是上游新增工具会自动出现在机器人的工具列表中。为此建立**工具清单快照测试**：每次升级时对比 `--dump-config` 与工具 schema 列表，新出现的工具必须经人工评审后明确保留或禁用。若某型号机器人需要严格固定能力集，可改为参照上游 `sdk-minimal` 的方式自持完整配置树，代价是上游新能力需要显式引入。
+- EH 与 WH 都从上游模板派生，以 bundle 叠加 Steward 能力，不复制上游配置树。上游在 `dsh-base` 中新增或改进的通用能力自动生效。
+- 需要关闭的上游能力用 patch 按行 id 覆盖，并在 bundle 文档中写明原因。
+- 副作用是上游新增工具会自动出现在工具列表中。为此对每个 profile 建立**工具清单快照测试**：每次升级时对比 `--dump-config` 与工具 schema 列表，新出现的工具必须经人工评审后明确保留或禁用。对 EH 尤其重要：新增工具可能让机器人获得未经安全评审的能力。若某型号机器人需要严格固定能力集，可改为参照上游 `sdk-minimal` 的方式自持完整配置树，代价是上游新能力需要显式引入。
 
 ### P5 防腐层：DSH 依赖只出现在适配包
 
-- `ego-protocol`（传输协议）、ER、WSim、Observer **零 DSH 依赖**。
-- 所有 `@deepseek-ai/*` 导入集中在 `@steward/dsh-*` 适配包中。上游 API 变化（公开 API 仍为 pre-stable）只影响这一层。
-- 这样 Ego 系统的实时部分可以独立演进，甚至在不使用 DSH 的场景中复用。
+- `ego-protocol`、`world-protocol`、ER、WSim、Renderer、Observer **零 DSH 依赖**。
+- 所有 `@deepseek-ai/*` 导入集中在 `steward/dsh/` 下的适配包中。上游 API 变化（公开 API 仍为 pre-stable）只影响这一层。
+- 实时部分可以独立演进，也可在不使用 DSH 的场景中复用。
 
 ### P6 遵守上游运行时约定
 
 - **模型可见即已记录**：所有进入模型请求的内容都可从会话日志重建。
 - **Seam 完整**：每个能力同时设计 Definition / Provider / Consumer；Consumer 依赖 Definition 而非具体 Provider。
 - **注册即副作用**：所有注册经 `ctx.effect()` / `ctx.on()`，插件卸载时可撤销，支持上游的热重载。
-- **配置不硬编码**：部署相关参数（端点、阈值、超时）都是校验过的 `Config` 字段；配置错误在加载时立即失败。
-- **跨边界 id 带品牌类型**：例如 `EgoObjectId`、`PredictionId` 不使用裸 `string`。
+- **配置不硬编码**：部署相关参数（端点、阈值、超时、扰动预算）都是校验过的 `Config` 字段；配置错误在加载时立即失败。
+- **跨边界 id 带品牌类型**：例如 `EgoObjectId`、`PredictionId`、`AssetId`、`ValidationReceiptId` 不使用裸 `string`。
 
 ### P7 持久化兼容
 
-- 自有事件使用独立命名空间（`ego/*`、`robot/*`），只做仅日志事件，不改变上游消息投影。
+- 自有事件使用独立命名空间（`ego/*`、`robot/*`、`world/*`），只做仅日志事件，不改变上游消息投影。
 - 不直接读写 DSH 会话文件的物理格式；查询与导出使用上游 session-query、SDK 等公开接口。
 - 关注上游会话格式版本说明与升级指南；会话格式升级时，用上游迁移路径处理，不自行改写日志。
 
@@ -600,41 +835,47 @@ ES 的持续收敛来自 State Estimator：每帧观测与已有 belief 融合�
 
 ```mermaid
 flowchart LR
-  A["上游发布新版本"] --> B["阅读该版本 upgrade-guide 与发布说明"]
-  B --> C["升级锁定版本（自动化依赖更新 PR）"]
-  C --> D["兼容测试套件"]
-  D --> E{"全部通过？"}
-  E -- 是 --> F["合入；评估可采纳的新特性"]
-  E -- 否 --> G["只修改 @steward/dsh-* 适配层"]
-  G --> D
+  A["上游主线更新 / 发布新版本"] --> B["git fetch upstream<br/>阅读 upgrade-guide 与发布说明"]
+  B --> C["合并 upstream/master 到 fork<br/>（只增不改，应无冲突）"]
+  C --> D["Canary：针对 fork 中的上游最新源码<br/>构建并运行兼容测试"]
+  D --> E["正式版本发布后<br/>升级 Steward 锁定的 npm 版本"]
+  E --> F["兼容测试套件"]
+  F --> G{"全部通过？"}
+  G -- 是 --> H["合入；评估可采纳的新特性"]
+  G -- 否 --> I["只修改 steward/dsh/ 适配层"]
+  I --> F
 ```
 
 兼容测试套件包括：
 
-1. **配置快照**：`dsh --profile ego --dump-config` 的差异评审。
+1. **配置快照**：`dsh --profile ego --dump-config` 与 `dsh --profile world --dump-config` 的差异评审。
 2. **工具 schema 快照**：模型可见的工具名称、描述、参数。
-3. **真实组合测试**：通过 Loader 启动测试用 profile，配合 `dsh-ego-fake`，断言模型可见输出、会话事件与守卫行为（遵循上游"产品可见插件需要真实组合测试"的原则）。
-4. **录制会话回放**：用录制的模型响应回放典型任务，无需 API key 即可在 CI 中运行。
-5. **仿真冒烟**：在轻量 Scenario 中跑一个完整 Episode。
-6. **Canary**：定期针对上游最新预发布版本运行同一套件，提前发现破坏性变化，而不是等到正式升级时才处理。
+3. **真实组合测试**：通过 Loader 启动测试用 profile，配合 `dsh-ego-fake` / `dsh-world-fake`，断言模型可见输出、会话事件与守卫行为（遵循上游"产品可见插件需要真实组合测试"的原则）。
+4. **录制会话回放**：用录制的模型响应回放典型任务与扰动场景，无需 API key 即可在 CI 中运行。
+5. **仿真冒烟**：在轻量 Scenario 中跑一个含扰动的完整 Episode。
+6. **Canary**：定期针对 fork 中同步来的上游最新主线运行同一套件，提前发现破坏性变化。
 
 ### P9 主动采纳上游新特性
 
-每次升级后评审上游新增能力，优先以**配置**方式采纳，例如新的模型适配、上下文压缩策略、subagent 提供者、goal / schedule 能力、实验性 Agent Teams。采纳记录写入兼容性登记表，以便追踪哪些 Steward 自有实现可以被上游能力替代并删除。
+每次升级后评审上游新增能力，优先以**配置**方式采纳，例如新的模型适配、上下文压缩策略、subagent 提供者、goal / schedule 能力、实验性 Agent Teams。WH 尤其受益于上游编码智能体能力的改进（文件编辑、shell、图像理解）。采纳记录写入兼容性登记表。
 
 ### P10 实时安全与 agent loop 解耦
 
-DSH 不在任何实时回路中，ER 层安全监督不依赖 EH。因此上游对 agent loop、模型适配、会话机制的任何改动，都不可能破坏机器人的底层安全保证；最坏情况是 EH 不可用，ER 进入安全停止。
+DSH 不在任何实时回路中：ER 层安全监督不依赖 EH，WSim 的物理步进与触发器判定不依赖 WH。因此上游对 agent loop、模型适配、会话机制的任何改动，都不可能破坏机器人的底层安全保证或世界仿真的确定性；最坏情况是 EH 或 WH 不可用，ER 进入安全停止，WSim 继续按已注册的触发器运行或按策略暂停。
 
 ### 反模式清单
 
 | 不要做 | 原因 |
 |---|---|
-| 修改上游 `packages/` 中的代码以"临时"支持机器人功能 | 每次升级都要重新合并，最终无法跟进上游 |
-| 在一个 DSH 进程中运行多个机器人 | 破坏信息隔离，与实体部署不同构 |
-| 把 WSim 做成 DSH 插件或工具 | 实时物理与 LLM 回合耦合；GT 有泄漏到机器人上下文的风险 |
+| 修改 fork 中任何上游已有文件以"临时"支持 Steward 功能 | 每次同步上游都要解决冲突，最终无法跟进上游 |
+| 把 Steward 包放进上游的 `packages/` 或加入根工作区 | 被上游检查规则约束，且需要修改上游配置文件 |
+| 在一个 DSH 进程中运行多个机器人，或让 WH 与 EH 同进程 | 破坏信息隔离，与实体部署不同构 |
+| 把 WSim 物理步进做成 DSH 插件或工具 | 实时物理与 LLM 回合耦合 |
+| 让 WH 绕过 WCA 直接修改 WSim 内存或模型文件 | 扰动无法校验、记录与复现 |
+| 让 WH 轮询世界状态来"及时"施加扰动 | LLM 延迟导致错过时机且不可复现；应使用触发器 |
+| WH 经指令通道向机器人透露 GT 或预告扰动 | 破坏实验有效性 |
 | 让 EH 直接下发轨迹点或电机指令 | LLM 延迟与不确定性进入控制回路 |
-| 在 ER 或协议层直接引用 `@deepseek-ai/*` 类型 | 上游 API 变化会扩散到实时系统 |
+| 在 ER、WSim 或协议层直接引用 `@deepseek-ai/*` 类型 | 上游 API 变化会扩散到实时系统 |
 | 绕过 profile，自己写启动器挂载插件树 | 违反上游启动约定，失去 profile、patch 和插件管理能力 |
 | 把原始图像流写进会话或模型上下文 | 日志膨胀、token 成本失控 |
 | 依赖上游未导出的内部模块或会话文件格式 | 无兼容承诺，随时可能变化 |
@@ -644,13 +885,14 @@ DSH 不在任何实时回路中，ER 层安全监督不依赖 EH。因此上游�
 ### 8.1 WSim
 
 - MuJoCo 世界模型，固定步长推进，是 GT 唯一来源。
-- 支持多机器人、关节物体（门、抽屉、冰箱）、可破坏或状态可变物体（玻璃杯破碎、液体倾倒可用事件化近似）。
-- 对外提供：执行器输入接口、状态查询接口（仅 Steward 内部可达）、事件流（碰撞、跌落、破碎）。
+- 支持多机器人、关节物体（门、抽屉、冰箱）、可破坏或状态可变物体（玻璃杯破碎、液体倾倒可用事件化近似）、动态实体（行人、宠物，按脚本或简单行为模型运动）。
+- 对外接口：执行器输入（来自 ER）、WCA（来自 WH，含资产加载、扰动、触发器、时钟、Episode）、事件流（碰撞、跌落、破碎、扰动、触发）。状态查询只在 Steward 平面内部可达。
+- 触发器引擎：每个 Tick 判定已注册的条件（区域、物体状态、机器人状态、时间），满足时在 Tick 边界原子施加扰动。
 
 ### 8.2 Sensor Renderer
 
 - 按每个机器人的相机内外参从 WS 渲染 RGB、深度、分割（分割仅用于评估，不发给机器人）。
-- 噪声与失真模型：曝光、模糊、深度噪声、延迟、丢帧、遮挡，可在 Scenario 中配置，用于检验 ES 估计的鲁棒性。
+- 噪声与失真模型：曝光、模糊、深度噪声、延迟、丢帧、遮挡，可在 Scenario 中配置，也可由 WH 通过 WCA 在运行中改变（传感器条件类扰动）。
 - 本体感受数据（关节编码器、IMU、力传感器）同样加噪后发送。
 
 ### 8.3 Observer 与评估
@@ -659,64 +901,80 @@ DSH 不在任何实时回路中，ER 层安全监督不依赖 EH。因此上游�
 |---|---|
 | ES 质量 | 物体召回率、位置 / 姿态误差、类别准确率、陈旧率、误差随时间的下降曲线 |
 | 预测质量 | ESim 预测与实际结果的偏差、风险预测的校准度（预测风险 vs 实际事故率） |
+| 扰动响应 | 发现延迟（扰动发生到 ES 反映变化）、重规划延迟、扰动后任务成功率、扰动引发的事故 |
 | 安全 | 碰撞次数、跌落 / 破碎事件、守卫否决次数与正确性 |
 | 任务 | 子目标完成率、总耗时、重规划次数、人工干预次数 |
 | 成本 | 模型调用次数、token 数、平均决策延迟 |
 
-Observer 只读取 GT 与遥测通道数据，结果写入 Recorder 并显示在 Console，永不回传给机器人。
+Observer 只读取 GT、扰动事件与遥测通道数据，结果写入 Recorder，提供给 WH 与界面，永不回传给机器人。按合理性等级分组统计，god-mode 扰动的结果单独报告。
 
 ### 8.4 Recorder 与回放
 
-- WSim 状态、传感器数据、ES 快照、遥测事件以 MCAP 记录。
-- 每个机器人的 DSH 会话日志通过 `ego/snapshot-ref` 事件与 MCAP 时间轴对齐，实现"决策—感知—世界"三方同步回放。
+- WSim 状态、传感器数据、ES 快照、扰动与触发事件、遥测事件以 MCAP 记录。
+- 每个机器人的 EH 会话日志通过 `ego/snapshot-ref` 事件、WH 会话日志通过 Validation Receipt id 与 MCAP 时间轴对齐，实现"世界变化—机器人感知—机器人决策"同步回放。
 
-### 8.5 Steward Director（可选）
+### 8.5 界面
 
-一个独立的 DSH 实例（例如 `dsh --profile steward-director`），加载 Steward 自有的 Director bundle：
-
-- 工具：加载 / 生成 Scenario、启动与停止 Episode、读取 KPI、读取回放摘要。
-- 经 SDK 向各机器人 EH 派发任务（与人类操作者使用同一指令通道）。
-- 生成评估报告。
-- 它可以读 GT（它属于 Steward 平面），因此**必须**与机器人 EH 处于不同进程与凭据域，并且由 Scenario 规则限制其向机器人发送的内容。
+- WH 使用上游 Web 界面：左侧是与 WH 的对话，`@steward/client-ui-world` 客户端插件提供 3D 世界视图、扰动时间线、触发器列表和 KPI 面板。原先设想的独立 Steward Console 由这个插件实现。
+- 各机器人可选用 `@steward/client-ui-ego` 查看其 ES 与决策过程。实验员在世界视图中同时看到 GT 和某个机器人的 ES 叠加，是 Observer 的可视化，不经过机器人。
 
 ## 9. 仓库与包结构
 
+Steward 位于 fork 仓库中，只新增文件：
+
 ```
-steward/
-├── protocol/                     # ego-protocol：Protobuf / gRPC 定义（零 DSH 依赖）
-├── world/                        # WSim、Renderer、Scenario、Clock（Python / C++，MuJoCo）
-├── observer/                     # Observer、Evaluator、Recorder
-├── console/                      # Steward Console（3D 可视化与回放）
-├── ego-runtime/                  # ER：HAL、感知、估计、ESim、规划、执行、安全监督
-│   ├── hal-sim/
-│   └── hal-real/
-├── dsh/                          # 仅此目录依赖 @deepseek-ai/*（防腐层）
-│   ├── dsh-ego/                  # Service Definition
-│   ├── dsh-ego-runtime-client/   # Service Provider
-│   ├── dsh-ego-fake/             # 测试 Provider
-│   ├── dsh-tool-ego/             # 模型工具
-│   ├── dsh-robot-safety/         # 守卫与急停
-│   ├── dsh-ego-context/          # agent.inject 上下文
-│   ├── dsh-ego-events/           # SessionEventMap 扩展
-│   ├── dsh-ego-presets/          # Agent Preset
-│   ├── dsh-skills-household/     # DSH Skill
-│   ├── client-ui-ego/            # Web / Desktop 客户端插件
-│   ├── dsh-bundle-ego/           # EH bundle
-│   └── dsh-bundle-director/      # Steward Director bundle
-├── scenarios/                    # Scenario 定义与基准任务集
-├── compat/                       # 兼容测试：配置快照、工具快照、录制会话、canary
-└── docs/
-    └── compatibility-register.md # 兼容性登记表：临时替代方案与已采纳上游特性
+steward（fork 仓库根目录）
+├── （上游全部文件，保持不变，随 upstream/master 同步）
+├── steward.md                       # 本设计文档
+└── steward/                         # Steward 独立 pnpm 工作区
+    ├── protocol/
+    │   ├── ego-protocol/            # ER ↔ EH、遥测（零 DSH 依赖）
+    │   └── world-protocol/          # WCA（零 DSH 依赖）
+    ├── world/                       # WSim、触发器引擎、Renderer、Clock（Python / C++，MuJoCo）
+    ├── assets/                      # Asset Library、Validator、资产生成脚本
+    ├── observer/                    # Observer、Evaluator、Recorder
+    ├── ego-runtime/                 # ER：HAL、感知、估计、ESim、规划、执行、安全监督
+    │   ├── hal-sim/
+    │   └── hal-real/
+    ├── dsh/                         # 仅此目录依赖 @deepseek-ai/*（防腐层）
+    │   ├── dsh-ego/                 # EH：Service Definition
+    │   ├── dsh-ego-runtime-client/  # EH：Service Provider
+    │   ├── dsh-ego-fake/
+    │   ├── dsh-tool-ego/
+    │   ├── dsh-robot-safety/
+    │   ├── dsh-ego-context/
+    │   ├── dsh-ego-events/
+    │   ├── dsh-ego-presets/
+    │   ├── dsh-skills-household/
+    │   ├── client-ui-ego/
+    │   ├── dsh-bundle-ego/
+    │   ├── dsh-world/               # WH：Service Definition
+    │   ├── dsh-world-client/        # WH：Service Provider
+    │   ├── dsh-world-fake/
+    │   ├── dsh-tool-world-assets/
+    │   ├── dsh-tool-world-runtime/
+    │   ├── dsh-world-policy/
+    │   ├── dsh-world-events/
+    │   ├── dsh-world-presets/
+    │   ├── dsh-skills-world/
+    │   ├── client-ui-world/
+    │   └── dsh-bundle-world/
+    ├── scenarios/                   # Scenario 定义、扰动策略与基准任务集
+    ├── compat/                      # 兼容测试：配置快照、工具快照、录制会话、canary
+    └── docs/
+        └── compatibility-register.md
 ```
 
 ## 10. 测试策略
 
 | 层级 | 内容 | 依赖 |
 |---|---|---|
-| 单元测试 | ER 各模块、DSH 插件逻辑（使用 `dsh-ego-fake`） | 无仿真、无 API key |
-| 真实组合测试 | 经 Loader 启动测试 profile，断言工具 schema、守卫否决、会话事件 | 无仿真、无 API key |
-| 录制会话回放 | 回放典型任务的模型响应，检查 Steward 插件行为 | 无 API key |
-| 仿真集成 | 单机器人 / 多机器人 Scenario 完整 Episode | 仿真、可选 API key |
+| 单元测试 | ER、WSim 触发器引擎、各 DSH 插件逻辑（使用 fake provider） | 无仿真、无 API key |
+| 真实组合测试 | 经 Loader 启动 ego / world 测试 profile，断言工具 schema、守卫否决、会话事件 | 无仿真、无 API key |
+| 录制会话回放 | 回放典型任务、资产构建与扰动场景的模型响应 | 无 API key |
+| 资产校验 | 资产库中每个资产的编译、物理与预览检查 | MuJoCo |
+| 仿真集成 | 单机器人 / 多机器人、含扰动的完整 Episode | 仿真、可选 API key |
+| 扰动回放对比 | 同一 Scenario + 扰动序列在不同 Ego 版本上重放并对比 KPI | 仿真、API key |
 | 基准评估 | 固定 Scenario 集（整理桌面、开冰箱取物、做早餐…）跑 KPI | 仿真、API key |
 | 上游兼容 | 第 7 节 P8 的完整套件，含 canary | 视项目而定 |
 
@@ -724,10 +982,10 @@ steward/
 
 | 阶段 | 范围 | 验收标准 |
 |---|---|---|
-| Phase 0 | 单机器人、静态场景、理想感知（ES 直接来自加噪 GT，仅用于打通链路）；EH 工具与守卫 | 完成"把杯子放到桌上"类任务；兼容测试套件可运行 |
-| Phase 1 | 真实感知链路：渲染 → 检测 → 估计；ES 收敛评估 | ES Error 随探索稳定下降，指标在 Console 可见 |
-| Phase 2 | ESim 与不确定度推演；Prediction Receipt 守卫 | 在含易碎物体的场景中，事故率显著低于无 ESim 基线 |
-| Phase 3 | 精细操作 Skill（VLA / MPC）；长时任务（做一顿早餐） | 多子目标任务完成率达到设定阈值 |
+| Phase 0 | WSim 与 WCA 基础；WH 资产构建与场景编排；单机器人、理想感知（ES 直接来自加噪 GT，仅用于打通链路）；EH 工具与守卫 | WH 能从文字描述生成并校验一间厨房；机器人完成"把杯子放到桌上"；兼容测试套件可运行 |
+| Phase 1 | 真实感知链路：渲染 → 检测 → 估计；ES 收敛评估 | ES Error 随探索稳定下降，指标在界面可见 |
+| Phase 2 | ESim 与不确定度推演；WH 即时扰动、触发器与扰动策略守卫 | 在含易碎物体与扰动的场景中，事故率显著低于无 ESim 基线；扰动可完整重放 |
+| Phase 3 | 精细操作 Skill（VLA / MPC）；长时任务（做一顿早餐）在扰动下运行 | 多子目标任务在设定扰动强度下的完成率达到阈值 |
 | Phase 4 | 多机器人与显式通信 | 两台机器人协作完成任务且无信息泄漏 |
 | Phase 5 | 实体机器人：Real HAL、标定、动作捕捉近似 GT | 同一 EH bundle 无代码修改在实机上完成 Phase 3 任务 |
 
@@ -738,4 +996,7 @@ steward/
 3. Skill 库的粒度：多少由 VLA 端到端完成，多少由显式规划组合？
 4. 多机器人通信协议的语义层级（共享观测、共享意图、任务分配）。
 5. 实体部署时 EH 的模型推理位置（本机、边缘服务器、云端）与断网降级策略。
-6. 哪些 Steward 能力适合反馈给上游成为通用扩展点（例如面向连续物理系统的工具执行时限语义）。
+6. WH 生成资产的几何与物理真实度如何量化评估？是否需要人工审核关口？
+7. 由 WH 自动生成对抗性扰动（"红队"）时，如何保证扰动强度可控、不同 Ego 版本之间比较公平？
+8. 运行中增删资产采用 mjSpec 重编译还是预置物体池，对性能与确定性的影响需要实测。
+9. 哪些 Steward 能力适合反馈给上游成为通用扩展点（例如面向连续物理系统的工具执行时限语义）。
