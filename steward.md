@@ -1289,18 +1289,19 @@ steward（fork 仓库根目录）
 | 组件 | 功能 |
 |---|---|
 | 场景数据模型 | 第 4.2 节的 `SceneState`：WS 与 ES 共用的数据结构；`validate_world` / `validate_ego` 两种校验，ES 中出现 `w:` 标识即判定为信息泄漏；WSim 与 ESim 共用的 `SceneState → MJCF` 转换器；实体有向包围盒计算 |
-| 资产 | 生成器：建筑外壳、操作台、餐桌、带抽屉的柜子、杯子、盘子、碗、Phase 0 移动操作机器人；MuJoCo 物理校验（编译、质量、跌落、倾倒、穿透）；多视角预览渲染；按模板哈希寻址、带版本的资产库；也接受直接编写的实体模板 |
-| 场景与 Scenario | 从已发布资产组合场景（地面摆放或放在其他实体上），检查相互穿透与沉降；保存与加载 Scenario；默认 Phase 0 厨房 |
+| 资产 | 生成器：建筑外壳、操作台、餐边柜、餐桌、带抽屉的柜子、杯子、盘子、碗、Phase 0 移动操作机器人；MuJoCo 物理校验（编译、质量、跌落、倾倒、穿透）；多视角预览渲染；按模板哈希寻址、带版本的资产库；也接受直接编写的实体模板 |
+| 场景与 Scenario | 从已发布资产组合场景（地面摆放或放在其他实体上），检查相互穿透与沉降；保存与加载 Scenario；`phase0-kitchen`（把杯子放到桌上）与 `phase0-shuttle`（循环搬运，`steward up` 的默认 Scenario）两个厨房 |
+| 循环搬运任务 | 杯子和碗在餐桌 → 柜子 → 餐边柜 → 餐桌之间轮转：三件家具始终空一件，每步搬运下一站空着的那件物品，从不在同一件家具上堆放两件；每步从 ES 判断物品位置，风险超限时先靠近观察；`steward shuttle` 逐步显示进度并用 World State 核对，`--steps 0` 持续循环 |
 | WSim | 固定步长物理，按墙钟倍速推进；机器人底盘、升降、伸缩位置控制；理想抓取；带噪声的里程计与关节编码器；理想检测器（视野、遮挡、距离相关噪声、类别混淆）；World State 读回与「支撑」「附着」关系推导；总览与机器人相机渲染 |
 | Steward 主机 | 世界控制接口 WCA（状态、World State、时钟、Episode、渲染、Observer 报告、资产 / 场景 / Scenario 编写）；每个机器人一个独立端口，只提供传感器、相机、执行器命令与单向遥测 |
-| Ego Runtime | 检测融合为 ES（机器人自分配 `e:` id、卡尔曼位置融合、类别分布、存在概率、重复轨迹合并、支撑与附着关系）；基于 ES 的二维路径规划与停靠足迹检查；简化 ESim 与 Prediction Receipt；导航、抓取、放置、环顾技能；Ego API；运行端再次核验收据 |
+| Ego Runtime | 检测融合为 ES（机器人自分配 `e:` id、卡尔曼位置融合、类别分布、存在概率、重复轨迹合并、支撑与附着关系）；基于 ES 的二维路径规划、停靠足迹检查与预停靠点原地转身空间检查；简化 ESim 与 Prediction Receipt（放置点优先远离边缘）；导航、抓取、放置、环顾技能；执行现场的安全检查：停靠位姿偏差、抓取前夹爪对准、松手前夹爪须在台面范围内，否则不松手并报告失败；Ego API；运行端再次核验收据 |
 | Observer | ES 与 World State 关联；召回率、误检、位置误差、类别准确率、NEES、自定位误差；JSONL 记录；泄漏检测 |
 | Ego Harness bundle | `ctx.ego` 服务定义与 HTTP 提供者；机器人工具 `ego_state`、`ego_query`、`ego_observe`、`ego_explore`、`ego_predict`、`skill_run`、`skill_status`、`body_stop`；安全守卫（`tools/pre-execute` 收据核验、`ctx.tools.guard` 最终否决、`/estop` 急停）；禁用继承自 `dsh-base` 的 shell、文件、网页、工作流、后台任务与工作目录工具，机器人只能经 `ctx.ego` 感知与行动 |
 | World Harness bundle | `ctx.world` 服务定义与 HTTP 提供者；工具 `world_status`、`world_scene`、`asset_search`、`asset_get`、`asset_create`、`asset_preview`、`asset_publish`、`scene_compose`、`scene_render`、`scenario_save`、`world_catalog`、`episode_control`、`world_clock`、`observer_report` |
 | Steward 控制台 | 浏览器页面 `http://127.0.0.1:7400/console`（由 WCA 端口提供，属于 Steward 平面）。主视图为斜上方视角的实时渲染：MuJoCo 自由相机渲染 World State，靠近相机一侧的墙体自动剖切（只影响渲染），机器人 ES 以三维线框、2σ 不确定度圈、自我位姿和 Observer 关联线按同一相机投影叠加；可拖动旋转、滚轮缩放，预设斜上方南 / 东南 / 西南与正上方视角。右栏为机器人头部相机、俯视地图（World State 与 ES）、Observer 指标与误差曲线、抓放事件；顶栏可暂停 / 继续 / 倍速 / 重置 / 切换 Scenario |
 | 主线程渲染 | macOS 上 OpenGL 必须在主线程运行：相机渲染、资产预览、Episode 加载与重置都由请求线程排队、主线程执行；没有主线程服务时请求超时而不阻塞物理 |
 | Episode 切换 | ER 检测到世界时钟倒退即视为重新开机，清空 ES、收据并取消正在执行的技能 |
-| 检查与工具 | pytest 29 项；DSH 单元测试与跨语言集成测试 5 项；三个 profile 的组合配置快照比对；多随机种子回归脚本；命令行 `steward build-kitchen / world / ego / up / demo`；运行脚本 `run-ego.sh`、`run-world.sh` |
+| 检查与工具 | pytest 32 项；DSH 单元测试与跨语言集成测试 5 项；三个 profile 的组合配置快照比对；多随机种子回归脚本；命令行 `steward build-kitchen / world / ego / up / demo`；运行脚本 `run-ego.sh`、`run-world.sh` |
 
 ### 13.3 实际布局
 
@@ -1363,8 +1364,13 @@ open http://127.0.0.1:7400/console
 .venv/bin/steward world --wca-port 7400 --robot-port 7410
 .venv/bin/steward ego --robot-url http://127.0.0.1:7410 --api-port 7420
 
-# 加载指定 Scenario（例如 WH 生成的 llm-kitchen）
+# 加载指定 Scenario（默认 phase0-shuttle；也可用 phase0-kitchen 或 WH 生成的 llm-kitchen）
 .venv/bin/steward up --scenario llm-kitchen
+
+# 循环搬运：连到正在运行的 steward up，逐步显示进度并用 World State 核对；--steps 0 持续循环直到 Ctrl+C
+.venv/bin/steward shuttle --api http://127.0.0.1:7420 --steps 0
+# 或在进程内独立运行固定步数
+.venv/bin/steward shuttle --steps 12 --speed 6
 
 # 构建 DSH 插件，创建 ego（机器人）、world 与 world-task（世界）三个 profile
 ./scripts/setup-dsh-profiles.sh
@@ -1403,6 +1409,7 @@ EH profile 默认从上游 `headless` 模板派生（设置 `ROBOT_TEMPLATE=web`
 | DSH 加载 | `--dump-config` 显示 `dsh-base → dsh-headless → @steward/dsh-bundle-ego`；非法端点在加载时被拒并指明配置行；WH Web 界面正常启动 |
 | 模型驱动：机器人 | DeepSeek 模型经 `run-ego.sh` 在默认厨房与 WH 生成的 `llm-kitchen` 中都自主完成「把杯子放到桌上」（环顾 → 预测 → 靠近 → 抓取 → 放置 → 自查），World State 确认；Observer 平均位置误差 0.5–1.0 厘米，无泄漏；运行中未调用任何 shell 或文件工具 |
 | 模型驱动：WH | DeepSeek 模型经 `run-world.sh` 根据文字描述新建并发布 3 个资产（房间、操作台、小餐桌），全部通过物理校验；复用杯、碗、盘与机器人组合出 `llm-kitchen` 场景并保存同名 Scenario；该 Scenario 可经 WCA 加载 |
+| 循环搬运 | `steward shuttle --steps 12`：四整轮共 12 次搬运全部由 World State 逐步确认；pytest 覆盖前三步的轮转顺序与「任何时刻两件物品不在同一家具上」 |
 | 能力边界 | EH 的组合配置中 `tool-bash`、`tool-pwsh`、`tool-jobs`、`tool-fs`、`tool-fs-search`、`tool-web`、`tool-workflow`、`tool-working-directory` 均为禁用，变化纳入快照比对 |
 
 ### 13.6 与设计的偏差

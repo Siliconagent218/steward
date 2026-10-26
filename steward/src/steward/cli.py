@@ -5,6 +5,7 @@
     steward ego                      run one robot's Ego Runtime + Ego API
     steward up                       run world and ego for every scenario robot in one process
     steward demo                     scripted "cup to table" mission, checked against World State
+    steward shuttle                  carry objects around table → cabinet → sideboard, step by step
 """
 
 from __future__ import annotations
@@ -142,20 +143,114 @@ def cmd_demo(args) -> int:
     return 0 if ok_mission and on_table else 1
 
 
+def _ground_truth_locations(scene: dict, supports: list[str], objects: list[str]) -> dict[str, str | None]:
+    """Support category under each carried object category, from World State relations."""
+    category = {e["id"]: e["category"]["value"] for e in scene["entities"]}
+    out: dict[str, str | None] = {cat: None for cat in objects}
+    for rel in scene["relations"]:
+        a, b = category.get(rel["a"]["entity"]), category.get(rel["b"]["entity"])
+        if rel["type"] == "supported-by" and a in out and b in supports:
+            out[a] = b
+    return out
+
+
+SUPPORT_NAMES = {"table": "餐桌", "cabinet": "柜子", "sideboard": "餐边柜", "counter": "操作台"}
+OBJECT_NAMES = {"cup": "杯子", "bowl": "碗", "plate": "盘子"}
+
+
+def cmd_shuttle(args) -> int:
+    """Shuttle objects between table, cabinet and sideboard, checking each move against World State."""
+    from steward.mission import MissionFailed, shuttle
+    from steward.net import call
+
+    supports, objects = ["table", "cabinet", "sideboard"], ["cup", "bowl"]
+    host = runtime = api = None
+    if args.api:
+        api_url = args.api.rstrip("/")
+        def world_scene():
+            return call("GET", f"{args.wca.rstrip('/')}/wca/scene")
+    else:
+        from steward.authoring.service import AuthoringService, build_default_kitchen
+
+        if args.scenario not in AuthoringService(args.root).list_scenarios():
+            build_default_kitchen(AuthoringService(args.root))
+        run_dir = Path(args.root) / "runs" / ("shuttle-" + time.strftime("%Y%m%d-%H%M%S"))
+        host = _host(args, run_dir)
+        runtime, api = _start_ego(host.robot_servers["w:robot-1"].url, 0, run_dir / "ego")
+        api_url = api.url
+        def world_scene():
+            return host.sim.world_state()
+        print(json.dumps({"console": f"{host.wca.url}/console"}), flush=True)
+    t0 = time.monotonic()
+    results: list[bool] = []
+
+    def on_step(index: int, move: dict) -> None:
+        time.sleep(0.5)
+        truth = _ground_truth_locations(world_scene(), supports, objects)
+        ok = truth.get(move["object"]) == move["to"]
+        results.append(ok)
+        if args.steps > 0:
+            filled = int(30 * (index + 1) / args.steps)
+            progress = f"[{'#' * filled}{'-' * (30 - filled)}] {index + 1}/{args.steps}"
+        else:
+            progress = f"[第 {index + 1} 步，第 {index // 3 + 1} 轮]"
+        print(f"{progress}  "
+              f"{OBJECT_NAMES.get(move['object'], move['object'])}：{SUPPORT_NAMES[move['from']]} → "
+              f"{SUPPORT_NAMES[move['to']]}  World State {'确认' if ok else '不一致'} "
+              f"{ {OBJECT_NAMES.get(k, k): SUPPORT_NAMES.get(v, v) for k, v in truth.items()} }  "
+              f"({time.monotonic() - t0:.0f}s)", flush=True)
+
+    outcome: dict = {}
+
+    def mission() -> None:
+        try:
+            outcome["result"] = shuttle(api_url, args.steps, tuple(supports), tuple(objects), on_step=on_step)
+        except MissionFailed as exc:
+            outcome["error"] = str(exc)
+
+    worker = threading.Thread(target=mission, name="shuttle", daemon=True)
+    worker.start()
+    interrupted = False
+    try:
+        while worker.is_alive():
+            if host is not None:
+                host.pump(0.05)
+            else:
+                worker.join(0.2)
+    except KeyboardInterrupt:
+        interrupted = True
+        if host is None:
+            call("POST", f"{api_url}/skill/stop", {})
+    finished = "result" in outcome or (interrupted and "error" not in outcome)
+    ok = finished and (args.steps <= 0 or len(results) == args.steps) and all(results)
+    print(json.dumps({"completedSteps": len(results), "allConfirmedByWorldState": ok,
+                      "error": outcome.get("error")}, ensure_ascii=False), flush=True)
+    if host is not None:
+        api.stop()
+        runtime.stop()
+        host.stop()
+    return 0 if ok else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="steward")
     parser.add_argument("--root", default=str(DEFAULT_ROOT), help="Steward data root (assets, scenes, runs)")
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("build-kitchen").set_defaults(fn=cmd_build_kitchen)
-    for name, fn in (("world", cmd_world), ("up", cmd_up), ("demo", cmd_demo)):
+    for name, fn in (("world", cmd_world), ("up", cmd_up), ("demo", cmd_demo), ("shuttle", cmd_shuttle)):
         p = sub.add_parser(name)
-        p.add_argument("--scenario", default="phase0-kitchen")
-        p.add_argument("--speed", type=float, default=1.0 if name != "demo" else 4.0)
+        p.add_argument("--scenario", default="phase0-kitchen" if name == "demo" else "phase0-shuttle")
+        in_process = name in ("demo", "shuttle")
+        p.add_argument("--speed", type=float, default=4.0 if in_process else 1.0)
         p.add_argument("--seed", type=int, default=0)
-        p.add_argument("--wca-port", type=int, default=7400 if name != "demo" else 0)
-        p.add_argument("--robot-port", type=int, default=7410 if name != "demo" else 0)
+        p.add_argument("--wca-port", type=int, default=0 if in_process else 7400)
+        p.add_argument("--robot-port", type=int, default=0 if in_process else 7410)
         if name == "up":
             p.add_argument("--api-port", type=int, default=7420)
+        if name == "shuttle":
+            p.add_argument("--steps", type=int, default=6, help="number of moves; 0 repeats until Ctrl-C")
+            p.add_argument("--api", help="Ego API of a running `steward up`; omit to run in-process")
+            p.add_argument("--wca", default="http://127.0.0.1:7400", help="WCA of the running world (with --api)")
         p.set_defaults(fn=fn)
     p = sub.add_parser("ego")
     p.add_argument("--robot-url", default="http://127.0.0.1:7410")

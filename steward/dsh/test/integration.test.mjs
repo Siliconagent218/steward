@@ -16,7 +16,7 @@ const STEWARD = resolve(import.meta.dirname, '../..')
 const PYTHON = join(STEWARD, '.venv/bin/python')
 
 function startSteward(root) {
-  const child = spawn(PYTHON, ['-m', 'steward.cli', '--root', root, 'up', '--speed', '6', '--wca-port', '0',
+  const child = spawn(PYTHON, ['-m', 'steward.cli', '--root', root, 'up', '--scenario', 'phase0-kitchen', '--speed', '6', '--wca-port', '0',
     '--robot-port', '0', '--api-port', '0'], { cwd: STEWARD, stdio: ['ignore', 'pipe', 'inherit'] })
   return new Promise((resolvePromise, reject) => {
     let buffer = ''

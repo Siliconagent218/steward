@@ -72,6 +72,19 @@ def counter(width: float = 1.8, depth: float = 0.6, height: float = 0.9) -> Enti
     return _entity("counter", "object", "fixed", [link])
 
 
+def sideboard(width: float = 1.4, depth: float = 0.45, height: float = 0.85) -> Entity:
+    """Fixed low storage cabinet with a flat top; its long side runs along local y and its front faces +x."""
+    top = 0.03
+    plinth = 0.06
+    geoms = [
+        primitive("box", [depth - 0.04, width - 0.04, plinth], pose([0, 0, plinth / 2]), WOOD),
+        primitive("box", [depth, width, height - top - plinth], pose([0, 0, plinth + (height - top - plinth) / 2]), LIGHT_WOOD),
+        primitive("box", [depth + 0.02, width + 0.02, top], pose([0, 0, height - top / 2]), WOOD),
+    ]
+    link = Link(id="body", name="sideboard", geometry={"collision": geoms}, affordances=[exact("support-surface")])
+    return _entity("sideboard", "object", "fixed", [link])
+
+
 def dining_table(width: float = 1.2, depth: float = 0.8, height: float = 0.75, mass: float = 25.0) -> Entity:
     """Free-standing table: heavy but movable."""
     top_t, leg = 0.04, 0.05
@@ -211,6 +224,7 @@ def steward_bot(camera_pitch_deg: float = 30.0, camera_fovy_deg: float = 60.0) -
 GENERATORS: dict[str, Callable[..., Entity]] = {
     "building": building,
     "counter": counter,
+    "sideboard": sideboard,
     "dining_table": dining_table,
     "cabinet_with_drawer": cabinet_with_drawer,
     "cup": cup,

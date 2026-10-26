@@ -218,9 +218,34 @@ def kitchen_spec() -> dict:
     }
 
 
+SHUTTLE_TASK = ("反复在餐桌、柜子和餐边柜之间搬运物品，循环进行：物品按「餐桌 → 柜子 → 餐边柜 → 餐桌」的顺序轮转，"
+                "每次把下一站空着的那件物品搬过去，任何时候都不要在同一件家具上堆放两件被搬运的物品。")
+
+
+def shuttle_spec() -> dict:
+    """Kitchen for the shuttle task: a cup on the table, a bowl on the cabinet and an empty
+    sideboard along the west wall, so one of the three surfaces is always free."""
+    return {
+        "name": "phase0-shuttle",
+        "entities": [
+            {"id": "w:room", "asset": "kitchen-room", "at": {"x": 0.0, "y": 0.0}},
+            {"id": "w:counter-1", "asset": "counter", "at": {"x": 0.0, "y": 2.18}},
+            {"id": "w:cabinet-1", "asset": "drawer-cabinet", "at": {"x": 2.70, "y": 0.6, "yaw": math.pi}},
+            {"id": "w:sideboard-1", "asset": "sideboard", "at": {"x": -2.755, "y": 0.6}},
+            {"id": "w:table-1", "asset": "dining-table", "at": {"x": 0.6, "y": -0.9}},
+            {"id": "w:plate-1", "asset": "plate", "on": "w:counter-1", "offset": [0.35, 0.0]},
+            {"id": "w:cup-1", "asset": "cup", "on": "w:table-1", "offset": [-0.25, 0.1]},
+            {"id": "w:bowl-1", "asset": "bowl", "on": "w:cabinet-1", "offset": [0.0, 0.0]},
+            {"id": "w:robot-1", "asset": "steward-bot", "at": {"x": -1.6, "y": -1.3, "yaw": 0.0}},
+        ],
+        "regions": [{"id": "kitchen", "label": "kitchen", "polygon": [[-3, -2.5], [3, -2.5], [3, 2.5], [-3, 2.5]]}],
+    }
+
+
 KITCHEN_ASSETS = {
     "kitchen-room": ("building", {"width": 6.0, "depth": 5.0}),
     "counter": ("counter", {}),
+    "sideboard": ("sideboard", {}),
     "drawer-cabinet": ("cabinet_with_drawer", {}),
     "dining-table": ("dining_table", {}),
     "cup": ("cup", {}),
@@ -244,5 +269,13 @@ def build_default_kitchen(service: AuthoringService) -> dict:
         "scene": "phase0-kitchen",
         "robots": ["w:robot-1"],
         "task": "把杯子放到桌上。",
+    })
+    service.compose_scene(shuttle_spec())
+    service.save_scenario({
+        "name": "phase0-shuttle",
+        "scene": "phase0-shuttle",
+        "robots": ["w:robot-1"],
+        "task": SHUTTLE_TASK,
+        "shuttle": {"supports": ["table", "cabinet", "sideboard"], "objects": ["cup", "bowl"]},
     })
     return {"assets": {k: v["version"][:12] for k, v in published.items()}, "scene": scene, "scenario": scenario}

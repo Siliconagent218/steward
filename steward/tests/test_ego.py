@@ -66,6 +66,23 @@ def test_esim_refuses_uncertain_pick_and_accepts_after_observation(kitchen_scene
     assert near["plan"]["support"] != cup_id
 
 
+def test_translate_keeps_heading_in_the_odometry_yaw_frame():
+    from steward.ego.skills import SkillExecutor
+
+    commands: list[dict] = []
+    stamp = {"t": 0.0}
+
+    def state() -> dict:
+        stamp["t"] += 1.0
+        return {"stamp": stamp["t"], "odometry": {"x": 0.0, "y": 0.0, "yaw": 2 * 3.14159265 + 0.1}, "joints": {},
+                "gripper": {}, "entities": {}, "toolOffset": 0.26}
+
+    executor = SkillExecutor(commands.append, state, lambda _id: None)
+    executor.config.tick_s = 0.0
+    executor._translate_to(0.0, 0.0, 0.1)
+    assert abs(commands[-1]["base"][2] - (2 * 3.14159265 + 0.1)) < 1e-6
+
+
 def test_esim_place_requires_holding(kitchen_scene):
     sim = WorldSim(kitchen_scene, seed=6)
     model = steward_bot().to_dict()

@@ -140,9 +140,9 @@ class Esim:
             if blocked:
                 reasons.append(f"side {normal}: dock pose collides with {blocked}")
                 continue
-            blocked = self._footprint_blocked(obstacles_all, predock, yaw)
+            blocked = self._turn_blocked(obstacles_all, predock)
             if blocked:
-                reasons.append(f"side {normal}: pre-dock pose collides with {blocked}")
+                reasons.append(f"side {normal}: no room to turn at the pre-dock pose ({blocked})")
                 continue
             path = astar(grid, (rx, ry), predock)
             if path is None:
@@ -156,6 +156,13 @@ class Esim:
         if best is None:
             raise PredictionError("no feasible approach: " + "; ".join(reasons))
         return best
+
+    def _turn_blocked(self, obstacles: list[Box2D], xy: tuple[float, float]) -> str | None:
+        """The robot turns in place at the pre-dock pose, sweeping its circumscribed circle."""
+        for box in obstacles:
+            if box.distance(xy[0], xy[1]) < self.radius + self.config.nav_margin:
+                return box.id
+        return None
 
     def _footprint_blocked(self, obstacles: list[Box2D], xy: tuple[float, float], yaw: float) -> str | None:
         me = Box2D("robot", xy[0], xy[1], yaw, self.half_x + 0.01, self.half_y + 0.01)
@@ -222,7 +229,7 @@ class Esim:
             issues.append(f"target existence probability is only {target.existence:.2f}")
         risk = 1.0 - (1.0 - p_miss) * (1.0 - existence_risk)
         plan = {**approach, "target": target.id, "support": support.id, "lift": tp[2],
-                "carryLift": min(self.config.lift_max, tp[2] + 0.10)}
+                "carryLift": min(self.config.lift_max, tp[2] + 0.10), "captureRadius": self.config.capture_radius}
         return self._receipt(es, "pick", params, risk, issues, plan)
 
     def _predict_place(self, es: SceneState, params: dict) -> dict:
@@ -248,7 +255,9 @@ class Esim:
             risk = 0.4
         fragility = (held.rigid.links[0].material.value or {}).get("fragility", 0.0) if held.rigid.links[0].material else 0.0
         risk = 1.0 - (1.0 - risk) * (1.0 - 0.05 * fragility)
-        plan = {**approach, "object": held.id, "support": support.id, "spot": list(spot), "lift": height}
+        plan = {**approach, "object": held.id, "support": support.id, "spot": list(spot), "lift": height,
+                "supportBox": {"cx": sbox.cx, "cy": sbox.cy, "yaw": sbox.yaw, "hx": sbox.hx, "hy": sbox.hy},
+                "heldHalf": max(held_box.hx, held_box.hy)}
         return self._receipt(es, "place", params, risk, issues, plan)
 
     @staticmethod
@@ -288,7 +297,8 @@ class Esim:
                 spot = world(float(lx), float(ly))
                 if any(math.hypot(spot[0] - o.cx, spot[1] - o.cy) < cfg.place_clearance for o in others):
                     continue
-                cost = math.hypot(spot[0] - rx, spot[1] - ry) + 2.0 * (min(sbox.hx - abs(lx), sbox.hy - abs(ly)))
+                edge = min(sbox.hx - abs(lx), sbox.hy - abs(ly))
+                cost = 0.3 * math.hypot(spot[0] - rx, spot[1] - ry) - 2.0 * edge
                 if cost < best_cost:
                     best, best_cost = spot, cost
         if best is None:
