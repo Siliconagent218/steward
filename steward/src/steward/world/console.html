@@ -461,15 +461,34 @@ $('chatInput').addEventListener('keydown', (e) => {
 $('chatChips').querySelectorAll('button').forEach(b => b.onclick = () => { $('chatInput').value = b.textContent; $('chatInput').focus(); });
 $('chatReset').onclick = async () => { try { await api('POST', '/console/chat/reset'); refreshChat(); } catch (e) { showError(e); } };
 
-function refreshRobotCamera() {
-  const img = $('camRobot');
-  if (!robotId || img.dataset.busy === '1') return;
-  img.dataset.busy = '1';
-  const next = new Image();
-  next.onload = () => { img.src = next.src; img.dataset.busy = '0'; };
-  next.onerror = () => { img.dataset.busy = '0'; };
-  next.src = `/wca/render?camera=${encodeURIComponent('robot:' + robotId)}&width=480&height=360&t=${Date.now()}`;
-  $('robotCamLabel').textContent = `${robotId} 头部相机`;
+const CAMERA_FPS = 15;
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+async function robotCameraLoop() {
+  const img = $('camRobot'), frames = [], period = 1000 / CAMERA_FPS;
+  let shown = null, due = performance.now();
+  for (;;) {
+    if (robotId && !document.hidden) {
+      try {
+        const res = await fetch(`/wca/render?camera=${encodeURIComponent('robot:' + robotId)}&width=480&height=360`, { cache: 'no-store' });
+        if (res.ok) {
+          const url = URL.createObjectURL(await res.blob());
+          const next = new Image();
+          next.src = url;
+          await next.decode();
+          img.src = url;
+          if (shown) URL.revokeObjectURL(shown);
+          shown = url;
+          const now = performance.now();
+          frames.push(now);
+          while (frames.length && frames[0] < now - 2000) frames.shift();
+          const fps = frames.length > 1 ? (frames.length - 1) * 1000 / (now - frames[0]) : 0;
+          $('robotCamLabel').textContent = `${robotId} 头部相机 · ${fps.toFixed(1)} fps`;
+        }
+      } catch (e) { /* a dropped frame is retried on the next tick */ }
+    }
+    due = Math.max(due + period, performance.now() - period);
+    await sleep(Math.max(0, due - performance.now()));
+  }
 }
 
 async function loadScenarios() {
@@ -488,7 +507,7 @@ for (const id of ['showGtLabels', 'showEgoLabels', 'showSigma', 'showError']) $(
 refresh().then(loadScenarios);
 setInterval(refresh, 500);
 setInterval(requestRenders, 400);
-setInterval(refreshRobotCamera, 333);
+robotCameraLoop();
 refreshChat();
 setInterval(refreshChat, 800);
 </script>
