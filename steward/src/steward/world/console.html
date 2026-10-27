@@ -81,16 +81,12 @@
   .composer textarea:focus { outline: none; border-color: #3c4652; }
   .composer button { height: 58px; }
   button:disabled { opacity: .5; cursor: default; }
-  @keyframes alertPulse { 0%, 100% { background: rgba(120, 20, 24, 0.95); } 50% { background: rgba(60, 14, 18, 0.95); } }
   @keyframes alertOutline { 0%, 100% { outline-color: #ff4d4d; } 50% { outline-color: #ff4d4d33; } }
   .robot-status { margin-top: 8px; border: 1px solid var(--line); border-radius: 8px; background: #11151a; padding: 8px 10px;
                   font-size: 12.5px; }
   .rs-now div { margin: 1px 0; } .rs-now .label { color: var(--muted); }
-  .rs-alert[hidden] { display: none; }
-  .rs-alert { margin: 6px 0; padding: 8px 10px; border: 1px solid #ff6b6b; border-radius: 6px; color: #ffd6d6;
-              white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow-y: auto; animation: alertPulse 1.1s ease-in-out infinite; }
-  .rs-alert b { color: #ff8a8a; display: block; margin-bottom: 4px; }
-  .rs-alert button { margin-top: 6px; border-color: #ff6b6b; }
+  .alert-ack { border-color: #ff6b6b; color: #ffb3b3; }
+  .alert-ack[hidden] { display: none; }
   .rs-history { max-height: 160px; overflow-y: auto; margin-top: 6px; border-top: 1px solid #20262e; padding-top: 4px;
                 font-variant-numeric: tabular-nums; }
   .rs-history .row { display: flex; gap: 6px; padding: 1px 0; align-items: baseline; }
@@ -101,6 +97,9 @@
   .rs-history .row.state .k { color: #c8a6ff; } .rs-history .row.alert .k, .rs-history .row.alert .x { color: #ff8a8a; }
   .rs-history .x { white-space: pre-wrap; word-break: break-word; }
   .viewport.alerting { outline: 3px solid #ff4d4d; outline-offset: -3px; animation: alertOutline 1.1s ease-in-out infinite; }
+  @keyframes alertTint { 0%, 100% { background: rgba(225, 30, 30, 0.38); } 50% { background: rgba(225, 30, 30, 0.04); } }
+  .viewport.alerting::after { content: ''; position: absolute; inset: 0; pointer-events: none;
+                              animation: alertTint 1.1s ease-in-out infinite; }
   .card h2 .sub { color: var(--muted); font-weight: 400; font-size: 12px; }
   .plan-goal { font-size: 14px; margin-bottom: 8px; }
   .plan-steps { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
@@ -170,8 +169,6 @@
         </div>
         <div class="robot-status" id="robotStatus">
           <div class="rs-now" id="rsNow">机器人尚未发布计划</div>
-          <div class="rs-alert" id="egoAlert" hidden><b>⚠ 机器人遇到无法自行处理的情况</b><span id="egoAlertText"></span>
-            <div><button id="egoAlertAck">知道了</button></div></div>
           <div class="rs-history" id="rsHistory"></div>
         </div>
       </div>
@@ -185,7 +182,7 @@
   </section>
   <section class="card chat">
     <h2>操作员对话 <span class="pill" id="chatStatus"></span>
-      <span class="spacer"></span><button id="chatStop" title="停止当前目标的本轮任务">停止</button><button id="chatReset">新会话</button></h2>
+      <span class="spacer"></span><button id="egoAlertAck" class="alert-ack" hidden title="确认当前告警：Ego State 窗口停止闪烁，被监测暂停的仿真继续">解除告警</button><button id="chatStop" title="停止当前目标的本轮任务">停止</button><button id="chatReset">新会话</button></h2>
     <div class="targets">
       <button data-target="world" class="on world">世界 · World Harness</button>
       <button data-target="robot" class="robot">机器人 · robot-1</button>
@@ -650,7 +647,6 @@ function toolSummary(m) {
 }
 function renderChat(chat) {
   const box = $('chatMsgs');
-  const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
   const open = new Set([...box.querySelectorAll('details[open]')].map(d => d.dataset.id));
   const label = (m) => (chat.agents[m.agent] || {}).label || m.agent;
   box.innerHTML = chat.messages.map(m => {
@@ -662,7 +658,7 @@ function renderChat(chat) {
   for (const [key, a] of Object.entries(chat.agents)) {
     if (a.busy) box.insertAdjacentHTML('beforeend', `<div class="msg system">${esc(a.label)} 正在处理…</div>`);
   }
-  if (nearBottom) box.scrollTop = box.scrollHeight;
+  box.scrollTop = box.scrollHeight;  // new input or output is always brought into view
 }
 function renderTarget() {
   const t = TARGETS[chatTarget];
@@ -689,23 +685,13 @@ const ALERT_SOURCES = { agent: '机器人智能体报告', skill: '技能执行�
 let robotAlerts = [], perceptionAlerts = [];
 const dismissedAlerts = new Set();
 function renderAlerts() {
-  // The alert sits in the status card below the Ego view (never over the render); the view's
-  // outline flashes while one is unacknowledged. Perception faults found by comparing the Ego
-  // State with the World State join the robot's own alerts.
-  const faults = perceptionAlerts.map(a => ({ id: `p${a.id}`, source: 'monitor', message: a.message, diagnosis: a.analysis,
-    count: 1, goal: '', step: '' }));
+  // Alert texts are read in the chat (the host prints every robot alert and perception fault there);
+  // here the Ego view only flashes while an alert is active, and the chat header offers to clear it.
+  const faults = perceptionAlerts.map(a => ({ id: `p${a.id}` }));
   const alerts = [...robotAlerts, ...faults].filter(a => !dismissedAlerts.has(a.id));
   shownAlerts = alerts;
-  const box = $('egoAlert');
   $('vpEgo').classList.toggle('alerting', alerts.length > 0);
-  if (!alerts.length) { box.hidden = true; return; }
-  const last = alerts[alerts.length - 1];
-  const more = alerts.length > 1 ? `（另有 ${alerts.length - 1} 条未确认）` : '';
-  const context = [['goal', '目标'], ['step', '当前步骤'], ['diagnosis', '自我诊断']]
-    .filter(([key]) => last[key]).map(([key, label]) => `${label}：${last[key]}`).join('\n');
-  $('egoAlertText').textContent = `${context ? context + '\n' : ''}${ALERT_SOURCES[last.source] || last.source}：${last.message}`
-    + `${last.count > 1 ? ` ×${last.count}` : ''}${more}`;
-  box.hidden = false;
+  $('egoAlertAck').hidden = alerts.length === 0;
 }
 const PLAN_STATES = { running: '执行中', recovering: '失败后恢复中', escaping: '疑似活锁，正在自救', 'waiting-operator': '活锁，等待操作员' };
 const STEP_MARKS = { done: '✓', active: '▶', failed: '✗', pending: '○', skipped: '–', completed: '✓', in_progress: '▶' };

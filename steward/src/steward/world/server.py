@@ -298,6 +298,8 @@ class StewardHost:
                       "kind": anomaly["kind"], "message": anomaly["message"], "analysis": anomaly["analysis"],
                       "acknowledged": False}
             self.perception_alerts.append(record)
+        paused = " 仿真已暂停，点「解除告警」后继续。" if self.pause_on_perception_fault else ""
+        self.chat.post_error("robot", f"⚠ 世界侧感知监测：{anomaly['message']}。{anomaly['analysis']}{paused}")
         if sim is not None:
             sim.events.append({"t": sim.time, "type": "observer/perception-fault", "robot": robot, "kind": anomaly["kind"],
                                "entity": anomaly["entity"]})

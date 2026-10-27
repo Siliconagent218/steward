@@ -289,6 +289,12 @@ class HarnessChat:
         del self._entries[:-400]
         return entry
 
+    def post_error(self, agent: str, text: str) -> None:
+        """Add an error line to the transcript under ``agent`` (for example a perception fault the
+        world found), so the operator reads every alert in the chat."""
+        with self._lock:
+            self._add(agent, "error", text)
+
     def _report(self, agent: _Agent, text: str) -> None:
         with self._lock:
             self._add(agent.key, "error", text)

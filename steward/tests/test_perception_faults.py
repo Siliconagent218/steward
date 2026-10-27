@@ -72,6 +72,8 @@ def test_a_perception_fault_pauses_the_world_until_acknowledged(kitchen_root, tm
     try:
         host._perception_fault("w:robot-1", {"kind": "phantom", "entity": "e:398", "message": "幽灵物体", "analysis": "墙角"})
         assert host.sim.paused and [a["message"] for a in host.active_perception_alerts()] == ["幽灵物体"]
+        printed = [m["text"] for m in host.chat.state()["messages"] if m["role"] == "error"]
+        assert printed and "世界侧感知监测：幽灵物体" in printed[-1], "the operator reads the fault in the chat"
         host.acknowledge_alerts()
         assert not host.sim.paused and host.active_perception_alerts() == []
     finally:
