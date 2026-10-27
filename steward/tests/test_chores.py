@@ -197,8 +197,42 @@ def test_a_stalled_motion_is_detected_within_the_window():
 
     stall = _Stall(0.0, 2.0, 0.01)
     assert not any(stall.stuck(t * 0.1, 1.0 - 0.05 * t) for t in range(15))
-    assert not stall.stuck(3.0, 0.3)
-    assert stall.stuck(5.1, 0.3)
+    assert not any(stall.stuck(1.4 + 0.25 * k, 0.3) for k in range(1, 9)), "still within the window"
+    assert stall.stuck(1.4 + 0.25 * 9, 0.3)
+    sparse = _Stall(0.0, 2.0, 0.01)
+    assert not any(sparse.stuck(float(k), 0.5) for k in range(1, 5)), "a few coarse updates are not a stall"
+
+
+def test_a_chair_blocking_the_sideboard_is_moved_out_of_the_way_before_the_drawer_swap(kitchen_root, tmp_path):
+    host = StewardHost(kitchen_root, scenario="phase0-chores", speed=6.0, seed=3, run_dir=tmp_path).start()
+    record = AuthoringService(kitchen_root).library.get("chair")
+    host.sim.edit_spawn("w:chair-1", record["template"], {"at": {"x": -2.1, "y": 0.6, "yaw": math.pi}}, {"id": "chair"})
+    runtime = EgoRuntime(RobotLink(host.robot_servers["w:robot-1"].url), steward_bot().to_dict())
+    runtime.start()
+    api = ego_api(runtime).start()
+    steps: list[str] = []
+    try:
+        before = drawer_contents(host.sim.world_state())
+        _explore(api.url, 120)
+        Chores(api.url, on_step=lambda r: steps.append(r["text"])).swap_drawers()
+        ok, detail = check_swap(before, host.sim.world_state())
+        assert ok, detail
+        assert any(text.startswith("清障完成") for text in steps), steps
+        chair = host.sim._entity_pose("w:chair-1")["p"]
+        assert chair[0] < -2.3 or abs(chair[1] - 0.6) > 1.0, "the chair no longer stands in front of the sideboard"
+    finally:
+        api.stop()
+        runtime.stop()
+        host.stop()
+
+
+def test_a_repeating_failure_is_recognised_whatever_its_numbers():
+    from steward.chores import _signature
+
+    a = _signature("drawers", "cannot open e:10: ['dock pose in front of e:10 collides with e:5'] at 1.23")
+    b = _signature("drawers", "cannot open e:12: ['dock pose in front of e:12 collides with e:7'] at -0.5")
+    assert a == b
+    assert a != _signature("table", "cannot open e:10: ['dock pose in front of e:10 collides with e:5'] at 1.23")
 
 
 def test_one_chores_round_is_confirmed_by_world_state(kitchen_root, tmp_path):

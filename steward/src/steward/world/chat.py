@@ -45,7 +45,9 @@ ROBOT_BRIEF = (
     "执行后用 ego_state 自查结果。完成或无法完成时，用一两句中文向操作员汇报。\n"
     "不要反复试错：ego_predict 的 issues 里给出建议时（例如「原地放下」的参数）先照做；同一个目标连续 3 次预测都不可行，"
     "或同一个技能失败 2 次，就停止尝试：调用 report_problem 报告遇到的情况、已经尝试过什么、需要操作员做什么，"
-    "然后向操作员说明。遇到工具报错或异常且无法绕过时，同样调用 report_problem。\n\n操作员任务："
+    "然后向操作员说明。遇到工具报错或异常且无法绕过时，同样调用 report_problem。\n"
+    "先想清楚为什么不可行：预测结果的 blockers 列出挡路的物体；如果是可搬动的（movable，例如椅子），"
+    "先把它搬到 parkAt 给出的不碍事位置，再重新预测原来的动作；不可搬动的障碍才需要换做法或报告。\n\n操作员任务："
 )
 
 ROBOT_OWNER = "operator"
@@ -244,7 +246,7 @@ class HarnessChat:
                     continue
                 self._seen_alerts.add(alert["id"])
                 source = {"agent": "机器人智能体", "skill": "技能执行", "runtime": "感知", "api": "Ego API",
-                          "harness": "Ego Harness"}.get(alert["source"], alert["source"])
+                          "harness": "Ego Harness", "mission": "家务任务"}.get(alert["source"], alert["source"])
                 self._add("robot", "error", f"⚠ 机器人遇到无法自行处理的情况（{source}）：{alert['message']}")
         return active
 

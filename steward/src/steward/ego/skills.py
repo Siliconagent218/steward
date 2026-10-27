@@ -63,17 +63,23 @@ class Job:
 
 class _Stall:
     """Detects a motion that stopped making progress: the error has not improved by ``step``
-    within ``window`` seconds of simulated (or wall) time."""
+    within ``window`` seconds of robot time and over at least ``samples`` fresh state updates
+    (at a high simulation speed one update can span a large part of the window)."""
 
-    def __init__(self, t0: float, window: float, step: float):
-        self.window, self.step = window, step
+    def __init__(self, t0: float, window: float, step: float, samples: int = 8):
+        self.window, self.step, self.samples = window, step, samples
         self.best = math.inf
         self.since = t0
+        self.last_stamp = t0
+        self.fresh = 0
 
     def stuck(self, stamp: float, err: float) -> bool:
+        if stamp != self.last_stamp:
+            self.last_stamp = stamp
+            self.fresh += 1
         if err < self.best - self.step:
-            self.best, self.since = err, stamp
-        return stamp - self.since > self.window
+            self.best, self.since, self.fresh = err, stamp, 0
+        return stamp - self.since > self.window and self.fresh >= self.samples
 
 
 class SkillExecutor:

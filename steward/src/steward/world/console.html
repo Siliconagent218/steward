@@ -541,7 +541,7 @@ function renderStatus() {
 }
 let shownAlerts = [];
 const ALERT_SOURCES = { agent: '机器人智能体报告', skill: '技能执行异常', runtime: '感知异常', api: 'Ego API 异常',
-  harness: 'Ego Harness 运行失败' };
+  harness: 'Ego Harness 运行失败', mission: '家务任务卡住' };
 const dismissedAlerts = new Set();
 function renderAlerts(alerts) {
   alerts = alerts.filter(a => !dismissedAlerts.has(a.id));

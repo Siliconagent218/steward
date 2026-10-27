@@ -17,6 +17,23 @@ class MissionFailed(RuntimeError):
     pass
 
 
+class Blocked(MissionFailed):
+    """A skill is infeasible because entities are in the way; ``blockers`` comes from the receipt
+    (id, category, movable, parkAt)."""
+
+    def __init__(self, message: str, blockers: list[dict]):
+        super().__init__(message)
+        self.blockers = blockers
+
+
+def infeasible(skill: str, receipt: dict) -> MissionFailed:
+    """The error for an infeasible receipt: :class:`Blocked` when movable entities are in the way."""
+    message = f"{skill} infeasible: {receipt['issues']}"
+    if any(b.get("movable") for b in receipt.get("blockers", [])):
+        return Blocked(message, receipt["blockers"])
+    return MissionFailed(message)
+
+
 def _find(summary: dict, category: str, min_probability: float = 0.25) -> dict | None:
     """The most likely object of a category, using the full category distribution so that an
     object briefly mislabelled by perception is still found."""
@@ -31,7 +48,7 @@ def _predict_until_safe(api: str, skill: str, params: dict, attempts: int = 5, s
         if receipt["withinRiskLimit"]:
             return receipt
         if not receipt["feasible"]:
-            raise MissionFailed(f"{skill} infeasible: {receipt['issues']}")
+            raise infeasible(skill, receipt)
         time.sleep(settle_s)
     raise MissionFailed(f"{skill} stayed above the risk limit: {receipt['risk']} {receipt['issues']}")
 
@@ -72,6 +89,8 @@ def _safe_receipt(api: str, skill: str, params: dict, observe: dict, log: list) 
     first = call("POST", f"{api}/ego/predict", {"skill": skill, "params": params})
     if first["withinRiskLimit"]:
         return first
+    if not first["feasible"] and any(b.get("movable") for b in first.get("blockers", [])):
+        raise infeasible(skill, first)
     moved = _approach_to_observe(api, observe)
     log.append({"step": "observe-closer", "target": observe["id"], "navigated": moved is not None,
                 "issues": first["issues"]})

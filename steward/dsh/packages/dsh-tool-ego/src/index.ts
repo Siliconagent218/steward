@@ -32,10 +32,12 @@ function receiptView(r: PredictionReceipt): JsonObject {
   for (const key of ['target', 'object', 'support', 'spot', 'dock', 'reach', 'lift', 'pathLength']) {
     if (key in plan) brief[key] = plan[key]
   }
-  return {
+  const view: JsonObject = {
     receipt: r.id, skill: r.skill, feasible: r.feasible, risk: r.risk, maxRisk: r.maxRisk,
     withinRiskLimit: r.withinRiskLimit, issues: r.issues, expiresAt: r.expiresAt, plan: brief,
   }
+  if (r.blockers && r.blockers.length) view.blockers = r.blockers.map(b => ({ ...b }))
+  return view
 }
 
 function jobView(job: SkillJob): JsonObject {
@@ -109,7 +111,10 @@ export function egoTools(ego: EgoService): ToolDefinition[] {
         + 'beside them, carried a few centimetres above the floor in front of the robot, and put down with at; '
         + 'while carrying them the robot needs more room to turn. Objects inside a drawer are only seen while it is '
         + 'open. If the risk is too high or the skill is infeasible, follow the issues (for example move closer and '
-        + 'observe, or choose another spot) and predict again. A receipt can be run once and expires.',
+        + 'observe, or choose another spot) and predict again. An infeasible receipt lists blockers: entities in the '
+        + 'way, whether they can be moved, and parking spots (parkAt) out of the way; clear a movable blocker first '
+        + '(pick it, place it at a parking spot), then predict the original skill again. A receipt can be run once '
+        + 'and expires.',
       parameters: {
         skill: { type: 'string', enum: ['navigate', 'pick', 'place', 'open', 'close'], required: true, description: 'Skill to predict.' },
         target: { type: 'string', description: 'pick: id of the object to grasp; open/close: id of the drawer.' },

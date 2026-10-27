@@ -53,6 +53,8 @@ class EsimConfig:
     floor_carry_lift: float = 0.05
     floor_release_gap: float = 0.015
     carry_retreat_max: float = 1.2
+    park_keep_clear: float = 0.9
+    park_spacing: float = 0.5
 
 
 class PredictionError(ValueError):
@@ -75,6 +77,7 @@ class Esim:
         grip = next(j for j in tree["joints"] if j["id"] == "gripper_mount")
         self.tool_offset = lift["origin"]["value"]["p"][0] + grip["origin"]["value"]["p"][0]
         self._ids = itertools.count(1)
+        self._blockers: set[str] = set()
 
     # ---------------------------------------------------------------- helpers
     def _self(self, es: SceneState) -> Entity:
@@ -230,6 +233,7 @@ class Esim:
         r = self.radius if radius is None else radius
         for box in obstacles:
             if box.distance(xy[0], xy[1]) < r + self.config.nav_margin:
+                self._blockers.add(box.id)
                 return box.id
         return None
 
@@ -239,8 +243,61 @@ class Esim:
         held = self._carried_box(carry, xy, yaw) if carry is not None else None
         for box in obstacles:
             if rects_overlap(me, box) or (held is not None and rects_overlap(held, box)):
+                self._blockers.add(box.id)
                 return box.id
         return None
+
+    # ---------------------------------------------------------------- blockers
+    def _describe_blockers(self, es: SceneState) -> list[dict]:
+        """Entities that made the prediction infeasible; floor-standing graspable ones are movable
+        and come with parking spots out of everyone's way."""
+        held = self._held(es)
+        out = []
+        for eid in sorted(self._blockers):
+            ent = es.find(eid)
+            if ent is None or ent.role == "environment" or ent.id == es.self_id:
+                continue
+            _, bottom, _ = entity_box(ent)
+            movable = self._affords(ent, "graspable") and bottom < 0.05 and (held is None or held.id != ent.id)
+            out.append({"id": ent.id, "category": ent.category.value, "movable": movable,
+                        "parkAt": self._parking_spots(es, ent) if movable else []})
+        return out
+
+    def _parking_spots(self, es: SceneState, obj: Entity, count: int = 4) -> list[list[float]]:
+        """Free floor spots for a movable object: inside the room, at least ``park_keep_clear`` from
+        furniture (the robot needs that room to work there), preferring spots along a wall."""
+        cfg = self.config
+        walls = [entity_box(e)[0] for e in es.entities if e.role == "environment"]
+        if not walls:
+            return []
+        x_lo, x_hi = min(w.cx for w in walls) + 0.06, max(w.cx for w in walls) - 0.06
+        y_lo, y_hi = min(w.cy for w in walls) + 0.06, max(w.cy for w in walls) - 0.06
+        box, _, _ = entity_box(obj)
+        shrink = self._sigma_xy(obj)
+        hx, hy = max(box.hx - shrink, 0.05), max(box.hy - shrink, 0.05)
+        reach = math.hypot(hx, hy)
+        others = []
+        for ent in es.entities:
+            if ent.id in (obj.id, es.self_id) or ent.role == "environment" or ent.existence < 0.3:
+                continue
+            ebox, bottom, _ = entity_box(ent)
+            if bottom < cfg.floor_furniture_height:
+                furniture = "support-surface" in prior(ent.category.value)["affordances"] or self._affords(ent, "pullable")
+                others.append((ebox, cfg.park_keep_clear if furniture else 0.3))
+        candidates = []
+        for x in np.arange(x_lo + reach + 0.05, x_hi - reach - 0.05 + 1e-9, 0.1):
+            for y in np.arange(y_lo + reach + 0.05, y_hi - reach - 0.05 + 1e-9, 0.1):
+                if all(o.distance(x, y) - reach >= clear for o, clear in others):
+                    wall = min(x - x_lo, x_hi - x, y - y_lo, y_hi - y) - reach
+                    near = math.hypot(x - box.cx, y - box.cy)
+                    candidates.append((wall + 0.1 * near, float(x), float(y)))
+        spots: list[list[float]] = []
+        for _, x, y in sorted(candidates):
+            if all(math.hypot(x - sx, y - sy) >= cfg.park_spacing for sx, sy in spots):
+                spots.append([round(x, 2), round(y, 2)])
+            if len(spots) == count:
+                break
+        return spots
 
     # ---------------------------------------------------------------- carrying
     def _held_relative(self, es: SceneState) -> tuple | None:
@@ -309,6 +366,7 @@ class Esim:
 
     # ----------------------------------------------------------------- skills
     def predict(self, es: SceneState, skill: str, params: dict) -> dict:
+        self._blockers = set()
         try:
             if skill == "navigate":
                 return self._predict_navigate(es, params)
@@ -320,7 +378,14 @@ class Esim:
                 return self._predict_drawer(es, skill, params)
             raise PredictionError(f"unknown skill {skill!r}; known: navigate, pick, place, open, close")
         except PredictionError as exc:
-            return self._receipt(es, skill, params, 1.0, [str(exc)], {}, feasible=False)
+            blockers = self._describe_blockers(es)
+            issues = [str(exc)] + [
+                f"{b['id']} ({b['category']}) is in the way and can be moved: pick it, put it down out of the way "
+                f"(for example place at={b['parkAt'][0]}), then predict again"
+                for b in blockers if b["movable"] and b["parkAt"]]
+            receipt = self._receipt(es, skill, params, 1.0, issues, {}, feasible=False)
+            receipt["blockers"] = blockers
+            return receipt
 
     def _predict_navigate(self, es: SceneState, params: dict) -> dict:
         rx, ry, ryaw = self._robot_xy_yaw(es)

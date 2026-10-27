@@ -35,6 +35,16 @@ export interface EgoQuery {
 }
 
 /** ESim result that authorises running one predicted plan once before it expires. */
+/** An entity in the way of a predicted skill. */
+export interface ReceiptBlocker {
+  id: string
+  category: string
+  /** True for floor-standing graspable entities the robot can carry out of the way. */
+  movable: boolean
+  /** Free floor spots [x, y] where a movable blocker can be put down. */
+  parkAt: number[][]
+}
+
 export interface PredictionReceipt {
   id: string
   skill: EgoSkill
@@ -49,6 +59,8 @@ export interface PredictionReceipt {
   /** Robot clock time after which the receipt is rejected. */
   expiresAt: number
   plan: JsonObject
+  /** Entities that made an infeasible prediction fail; movable ones come with parking spots. */
+  blockers?: ReceiptBlocker[]
   used?: boolean
 }
 
