@@ -7,6 +7,11 @@ Two kinds of listeners keep the information boundary explicit:
   Harness, operators, tests) may reach it;
 * one **robot port** per robot serves only that robot's sensor frames, camera images, actuator
   commands and one-way telemetry. Nothing on a robot port returns World State identifiers.
+
+The console's World State view renders on the host's own view loop thread
+(:class:`~steward.world.world_view.WorldViewRenderer`); the Ego-State view renders on the robot,
+in the Ego Runtime, and the host only relays its frames. Both follow the same view settings and
+the shared frame clock of :mod:`steward.viewloop`.
 """
 
 from __future__ import annotations
@@ -20,13 +25,14 @@ from typing import Any
 
 from steward.authoring.service import AuthoringError, AuthoringService
 from steward.glrender import IMAGE_FORMATS
-from steward.net import Binary, HttpError, JsonServer
+from steward.net import NO_CONTENT, Binary, HttpError, JsonServer, call, fetch
 from steward.observer.observer import Observer
 from steward.world.console import CONSOLE_HTML, console_state
-from steward.world.ego_view import EgoViewRenderer
 from steward.phases import DEFAULT_PHASE, phase_catalog, phase_modules
 from steward.world.chat import ChatConfig, HarnessChat
+from steward.viewloop import ViewLoop, ViewSettings, frame_response
 from steward.world.sim import EditError, PerceptionConfig, WorldSim
+from steward.world.world_view import WorldViewRenderer
 
 
 def image_format(query: dict) -> str:
@@ -63,7 +69,10 @@ class StewardHost:
         self._robot_port_config = robot_ports or {}
         self.robot_servers: dict[str, JsonServer] = {}
         self._main_tasks: queue.Queue[_MainTask] = queue.Queue()
-        self.ego_view = EgoViewRenderer()
+        self.ego_apis: dict[str, str] = {}
+        self.view_settings: ViewSettings | None = None
+        renderer = WorldViewRenderer(lambda: self.sim)
+        self.world_view = ViewLoop("world", renderer.render, renderer.close)
         if scenario is not None:
             self.load_episode(scenario)
 
@@ -135,8 +144,15 @@ class StewardHost:
         else:
             time.sleep(timeout)
 
+    def attach_ego_api(self, robot: str, url: str) -> None:
+        """Relay the console's Ego-State view of ``robot`` from the Ego API at ``url``."""
+        self.ego_apis[robot] = url
+        if self.view_settings is not None:
+            self._configure_robot_view(url)
+
     def start(self) -> StewardHost:
         self.wca.start()
+        self.world_view.start()
         if self.sim is not None:
             self.sim.start()
         return self
@@ -146,8 +162,7 @@ class StewardHost:
         for server in self.robot_servers.values():
             server.stop()
         self.wca.stop()
-        if threading.current_thread() is threading.main_thread():
-            self.ego_view.close()
+        self.world_view.stop()
         if self.sim is not None:
             self.sim.stop()
 
@@ -214,25 +229,25 @@ class StewardHost:
         def console_page(q, b):
             return Binary(CONSOLE_HTML.read_bytes(), "text/html; charset=utf-8")
 
-        def ego_render(q, b):
-            robot = q.get("robot") or next(iter(self.robot_servers), None)
-            ego = self.observer.latest_ego.get(robot) if robot else None
-            if ego is None:
-                raise HttpError(404, f"no ego state received from {robot!r} yet")
-            try:
-                camera = {"lookat": [float(v) for v in q["lookat"].split(",")], "distance": float(q["distance"]),
-                          "azimuth": float(q["azimuth"]), "elevation": float(q["elevation"])}
-            except (KeyError, ValueError) as exc:
-                raise HttpError(400, f"ego render needs lookat=x,y,z, distance, azimuth, elevation: {exc}") from None
-            width, height, fmt = int(q.get("width", 800)), int(q.get("height", 600)), image_format(q)
-            image = self.on_main(lambda: self.ego_view.render(robot, ego, camera, width, height, fmt))
-            return Binary(image, IMAGE_FORMATS[fmt])
+        def frame(q, b):
+            after = q.get("after")
+            if q.get("view", "world") == "world":
+                found = self.world_view.latest(int(after) if after else None)
+                if found is not None:
+                    return frame_response(found, self.world_view.status())
+                status = self.world_view.status()
+                if status["error"] and status["frame"] is None:
+                    raise HttpError(503, f"the world view cannot render: {status['error']}")
+                return NO_CONTENT
+            return self._relay_ego_frame(q.get("robot") or next(iter(self.ego_apis), None), after)
 
         return {
             ("GET", "/"): console_page,
             ("GET", "/console"): console_page,
             ("GET", "/console/state"): guard(lambda q, b: console_state(self)),
-            ("GET", "/console/ego-render"): guard(ego_render),
+            ("GET", "/console/frame"): guard(frame),
+            ("GET", "/console/view"): guard(lambda q, b: self.view_state()),
+            ("POST", "/console/view"): guard(lambda q, b: self.set_view(b)),
             ("GET", "/wca/status"): guard(lambda q, b: {"scenario": (self.scenario or {}).get("name"),
                                                         **(self.sim.status() if self.sim else {"loaded": False})}),
             ("GET", "/wca/scene"): guard(lambda q, b: self._require_sim().world_state()),
@@ -265,6 +280,54 @@ class StewardHost:
             ("POST", "/console/chat/stop"): guard(lambda q, b: self.chat.cancel(b.get("agent", "world"))),
             ("POST", "/console/alerts/ack"): guard(lambda q, b: self.chat.acknowledge_alerts()),
         }
+
+    # ------------------------------------------------------------------ views
+    def set_view(self, body: dict) -> dict:
+        """Apply console view settings to the World State view and every attached robot's Ego-State
+        view, so both render the same camera at the same rate on the shared frame clock."""
+        try:
+            self.view_settings = ViewSettings.parse(body)
+        except ValueError as exc:
+            raise HttpError(400, str(exc)) from None
+        self.world_view.configure(self.view_settings)
+        for url in self.ego_apis.values():
+            self._configure_robot_view(url)
+        return self.view_state()
+
+    def view_state(self) -> dict:
+        """Status of the World State view and of each robot's Ego-State view (``error`` when unreachable)."""
+        robots = {}
+        for robot, url in self.ego_apis.items():
+            try:
+                robots[robot] = call("GET", f"{url}/ego/view", timeout=1.0)
+            except (HttpError, OSError) as exc:  # the robot's view is reported as unavailable
+                robots[robot] = {"error": f"Ego API unreachable: {exc}"}
+        return {"world": self.world_view.status(), "ego": robots}
+
+    def _configure_robot_view(self, url: str) -> None:
+        try:
+            call("POST", f"{url}/ego/view", self.view_settings.to_dict(), timeout=1.0)
+        except (HttpError, OSError):  # the next frame request retries; view_state reports the failure
+            pass
+
+    def _relay_ego_frame(self, robot: str | None, after: str | None):
+        """The newest Ego-State frame from the robot's Ego API, passed through unchanged."""
+        url = self.ego_apis.get(robot or "")
+        if url is None:
+            raise HttpError(404, f"no Ego API is attached for robot {robot!r}")
+        try:
+            status, body, headers = fetch(f"{url}/ego/view/frame" + (f"?after={int(after)}" if after else ""), timeout=2.0)
+        except HttpError as exc:
+            if exc.status == 409 and self.view_settings is not None:
+                self._configure_robot_view(url)  # the robot restarted and lost its view settings
+                return NO_CONTENT
+            raise
+        except OSError as exc:
+            raise HttpError(502, f"the Ego API of {robot} is unreachable: {exc}") from None
+        if status == 204:
+            return NO_CONTENT
+        relayed = {k: v for k, v in headers.items() if k.startswith("X-") or k == "Cache-Control"}
+        return Binary(body, headers.get("Content-Type", "image/jpeg"), relayed)
 
     def _set_phase_request(self, body: dict) -> dict:
         try:

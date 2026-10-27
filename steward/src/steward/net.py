@@ -26,11 +26,16 @@ class HttpError(Exception):
 
 
 class Binary:
-    """A non-JSON response body."""
+    """A non-JSON response body, optionally with extra response headers."""
 
-    def __init__(self, data: bytes, content_type: str):
+    def __init__(self, data: bytes, content_type: str, headers: dict[str, str] | None = None):
         self.data = data
         self.content_type = content_type
+        self.headers = headers or {}
+
+
+NO_CONTENT = object()
+"""A handler result answered with ``204 No Content`` (for example: no newer frame yet)."""
 
 
 class JsonServer:
@@ -66,10 +71,15 @@ class JsonServer:
                 except Exception as exc:  # noqa: BLE001 - reported to the caller as a 500 body
                     self._send(500, {"error": f"{type(exc).__name__}: {exc}"})
                     return
-                if isinstance(result, Binary):
+                if result is NO_CONTENT:
+                    self.send_response(204)
+                    self.end_headers()
+                elif isinstance(result, Binary):
                     self.send_response(200)
                     self.send_header("Content-Type", result.content_type)
                     self.send_header("Content-Length", str(len(result.data)))
+                    for key, value in result.headers.items():
+                        self.send_header(key, value)
                     self.end_headers()
                     self.wfile.write(result.data)
                 else:
@@ -111,6 +121,20 @@ class JsonServer:
             self._httpd.shutdown()
             self._thread = None
         self._httpd.server_close()
+
+
+def fetch(url: str, timeout: float = 10.0) -> tuple[int, bytes, dict[str, str]]:
+    """GET a possibly binary resource: status, body and response headers (a 204 has an empty body).
+    Raise :class:`HttpError` with the server message on an error status."""
+    try:
+        with urllib.request.urlopen(urllib.request.Request(url), timeout=timeout) as resp:
+            return resp.status, resp.read(), dict(resp.headers.items())
+    except urllib.error.HTTPError as exc:
+        try:
+            message = json.loads(exc.read()).get("error", str(exc))
+        except Exception:  # noqa: BLE001 - fall back to the HTTP status text
+            message = str(exc)
+        raise HttpError(exc.code, message) from None
 
 
 def call(method: str, url: str, body: Any = None, timeout: float = 10.0) -> Any:

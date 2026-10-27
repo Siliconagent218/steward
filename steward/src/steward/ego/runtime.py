@@ -1,4 +1,5 @@
-"""Ego Runtime (ER): perception loop, Ego-State store, ESim receipts and skill execution.
+"""Ego Runtime (ER): perception loop, Ego-State store, ESim receipts, skill execution and the
+operator view of the Ego-State (rendered on its own thread, see :mod:`steward.viewloop`).
 
 The runtime talks to the world only through the robot port (sensors, actuator commands,
 telemetry). It never holds World State identifiers or ground truth.
@@ -20,9 +21,11 @@ from steward.ego.perception import box_of, decode_rgbd, segments
 from steward.ego.esim import Esim, EsimConfig
 from steward.ego.estimator import SELF_ID, EgoEstimator
 from steward.ego.skills import MotionConfig, SkillExecutor
+from steward.ego.view import EgoViewRenderer
 from steward.math3d import yaw_from_quat
 from steward.net import HttpError, call
 from steward.scene.schema import SceneState
+from steward.viewloop import ViewLoop
 
 
 @dataclass
@@ -80,6 +83,10 @@ class EgoRuntime:
         self._alert_ids = itertools.count(1)
         self.executor = SkillExecutor(self.link.command, self._motion_state, self._mark_held, self.config.motion,
                                       shift=self._shift_track, on_error=lambda msg: self.alert(msg, "skill"))
+        renderer = EgoViewRenderer()
+        self.view = ViewLoop("ego", lambda settings: (
+            renderer.render(self.ego_state().to_dict(), settings), "image/jpeg",
+            {"esVersion": self.estimator.version, "t": round(self.estimator.stamp, 3)}), renderer.close)
 
     # --------------------------------------------------------------- lifecycle
     def start(self) -> None:
@@ -88,9 +95,11 @@ class EgoRuntime:
         self._running = True
         self._thread = threading.Thread(target=self._loop, name="ego-perception", daemon=True)
         self._thread.start()
+        self.view.start()
 
     def stop(self) -> None:
         self._running = False
+        self.view.stop()
         if self._thread is not None:
             self._thread.join(timeout=2.0)
 

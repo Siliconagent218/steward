@@ -3,7 +3,7 @@
     steward build-kitchen            generate, validate and publish the Phase 0 kitchen
     steward world                    run WSim + Observer + WCA + robot ports
     steward ego                      run one robot's Ego Runtime + Ego API
-    steward up                       run world and ego for every scenario robot in one process
+    steward up                       run the world, and the robot's Ego Runtime in its own process
     steward demo                     scripted "cup to table" mission, checked against World State
     steward shuttle                  carry objects around table → cabinet → sideboard, step by step
     steward chores                   sort tableware, stack it on the sideboard, swap drawer contents; repeat
@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -78,6 +80,8 @@ def _chat_config(args):
 def cmd_world(args) -> int:
     run_dir = Path(args.root) / "runs" / time.strftime("%Y%m%d-%H%M%S")
     host = _host(args, run_dir)
+    if args.ego_api:
+        host.attach_ego_api("w:robot-1", args.ego_api)
     print(json.dumps({"console": f"{host.wca.url}/console", "wca": host.wca.url, "robots": {k: v.url for k, v in host.robot_servers.items()},
                       "runDir": str(run_dir)}), flush=True)
     _wait_forever([host.stop], host.pump)
@@ -95,22 +99,84 @@ def _start_ego(robot_url: str, api_port: int, out_dir: Path):
 
 
 def cmd_ego(args) -> int:
-    runtime, api = _start_ego(args.robot_url, args.api_port, Path(args.root) / "ego" / "observations")
+    out_dir = Path(args.out_dir) if args.out_dir else Path(args.root) / "ego" / "observations"
+    runtime, api = _start_ego(args.robot_url, args.api_port, out_dir)
     print(json.dumps({"egoApi": api.url, "robot": args.robot_url}), flush=True)
+    if args.parent_pid:
+        _exit_with_parent(args.parent_pid)
     _wait_forever([api.stop, runtime.stop])
     return 0
+
+
+def _exit_with_parent(parent_pid: int) -> None:
+    """Stop this process (as SIGTERM would) once the process that launched it is gone."""
+    def watch() -> None:
+        while os.getppid() == parent_pid:
+            time.sleep(1.0)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    threading.Thread(target=watch, name="parent-watch", daemon=True).start()
+
+
+class _EgoProcess:
+    """The robot's Ego Runtime, Ego API and Ego-State view in a process of its own, as on a robot:
+    nothing of it shares memory or OpenGL contexts with the world. Its output is passed through."""
+
+    def __init__(self, args, robot_url: str, out_dir: Path):
+        cmd = [sys.executable, "-m", "steward.cli", "--root", str(args.root), "ego", "--robot-url", robot_url,
+               "--api-port", str(args.api_port), "--out-dir", str(out_dir), "--parent-pid", str(os.getpid())]
+        self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True, start_new_session=True)
+        first = self.proc.stdout.readline()
+        if not first:
+            raise SystemExit(f"the Ego Runtime process exited with status {self.proc.wait()} before starting")
+        self.url = json.loads(first)["egoApi"]
+        self._stopping = False
+        self._reported = False
+        threading.Thread(target=self._relay, name="ego-output", daemon=True).start()
+
+    def _relay(self) -> None:
+        for line in self.proc.stdout:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+
+    def check(self) -> None:
+        """Report once on stderr when the Ego Runtime process ended without being stopped."""
+        if not self._stopping and not self._reported and self.proc.poll() is not None:
+            self._reported = True
+            print(f"steward up: the Ego Runtime process exited with status {self.proc.returncode}; "
+                  "the robot no longer perceives or acts", file=sys.stderr, flush=True)
+
+    def stop(self) -> None:
+        self._stopping = True
+        if self.proc.poll() is None:
+            self.proc.send_signal(signal.SIGTERM)
+            try:
+                self.proc.wait(10)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+                self.proc.wait()
 
 
 def cmd_up(args) -> int:
     run_dir = Path(args.root) / "runs" / time.strftime("%Y%m%d-%H%M%S")
     host = _host(args, run_dir)
     robot_url = host.robot_servers["w:robot-1"].url
-    runtime, api = _start_ego(robot_url, args.api_port, run_dir / "ego")
+    try:
+        ego = _EgoProcess(args, robot_url, run_dir / "ego")
+    except BaseException:
+        host.stop()
+        raise
+    host.attach_ego_api("w:robot-1", ego.url)
     if host.chat.config is not None:
-        host.chat.config.ego_api = api.url
-    print(json.dumps({"console": f"{host.wca.url}/console", "wca": host.wca.url, "robot": robot_url, "egoApi": api.url, "runDir": str(run_dir),
+        host.chat.config.ego_api = ego.url
+    print(json.dumps({"console": f"{host.wca.url}/console", "wca": host.wca.url, "robot": robot_url, "egoApi": ego.url, "runDir": str(run_dir),
                       "task": host.scenario["task"]}, ensure_ascii=False), flush=True)
-    _wait_forever([api.stop, runtime.stop, host.stop], host.pump)
+
+    def pump(timeout: float) -> None:
+        host.pump(timeout)
+        ego.check()
+
+    _wait_forever([ego.stop, host.stop], pump)
     return 0
 
 
@@ -391,6 +457,8 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("ego")
     p.add_argument("--robot-url", default="http://127.0.0.1:7410")
     p.add_argument("--api-port", type=int, default=7420)
+    p.add_argument("--out-dir", help="where the runtime writes its observations (default: <root>/ego/observations)")
+    p.add_argument("--parent-pid", type=int, help="exit when this process is gone (set by `steward up`)")
     p.set_defaults(fn=cmd_ego)
     args = parser.parse_args(argv)
     return args.fn(args)

@@ -1,4 +1,7 @@
-"""Render a robot's Ego-State as a 3D scene for the Steward console.
+"""Render the robot's own Ego-State as a 3D scene for the operator console.
+
+The renderer belongs to the robot: the Ego Runtime runs it on its view loop thread and serves the
+frames on the Ego API, so it sees nothing but the Ego-State and can run on the robot's computer.
 
 The Ego-State is converted with the same SceneState → MJCF converter that ESim uses, so the
 picture is the robot's own model of the world: only perceived entities, coloured by the colour it
@@ -7,9 +10,11 @@ fainter when their existence probability is low, the robot body at its own estim
 neutral floor for orientation. Walls on the camera side are left out so the camera looks into the
 room.
 
-A compiled model is reused while the set of rendered entities stays the same: each new Ego-State
-version only updates poses, sizes, colours and joint positions in place. All calls must run on
-the main thread (OpenGL); the Steward host routes them there.
+The robot and the floor are compiled into a model together with a pool of box slots; every other
+entity (each is one box in an Ego-State) is drawn by a slot whose pose, size and colour are set per
+frame, and unused slots are hidden. Tracks appearing and disappearing therefore cost nothing; the
+model is compiled again only when the robot model changes or the pool must grow (doubling). All
+calls must run on one thread, which owns the OpenGL renderers.
 """
 
 from __future__ import annotations
@@ -22,9 +27,10 @@ import mujoco
 import numpy as np
 
 from steward.glrender import close_renderer, encode_image, free_camera
-from steward.math3d import yaw_from_quat
+from steward.math3d import pose_compose, yaw_from_quat
 from steward.scene.mjcf import MjcfBuild, build_mjcf
 from steward.scene.schema import SceneState
+from steward.viewloop import ViewSettings
 
 CATEGORY_RGB = {
     "table": [0.79, 0.64, 0.42], "counter": [0.54, 0.42, 0.29], "cabinet": [0.63, 0.47, 0.31],
@@ -39,6 +45,16 @@ COLOR_RGB = {
 }
 DEFAULT_RGB = [0.62, 0.68, 0.75]
 FLOOR_ID = "e:render-floor"
+SLOT_MIN = 32
+HIDDEN_GROUP = 4  # not drawn by MuJoCo's default visualisation options
+
+
+def _slot_entity(k: int) -> dict:
+    return {"id": f"e:render-slot-{k}", "role": "object", "category": {"value": "slot"},
+            "pose": {"value": {"p": [0.0, 0.0, -10.0], "q": [1, 0, 0, 0]}},
+            "body": {"kind": "rigid", "root": {"value": "fixed"}, "links": [{"id": "slot", "name": "slot", "geometry": {
+                "collision": [{"kind": "primitive", "shape": "box", "size": [0.1, 0.1, 0.1],
+                               "pose": {"p": [0, 0, 0], "q": [1, 0, 0, 0]}, "rgba": [1, 1, 1, 1]}]}}]}}
 
 
 def ego_render_scene(ego: dict, toward_camera: np.ndarray, room_center: list[float]) -> SceneState:
@@ -79,6 +95,7 @@ class _Compiled:
     build: MjcfBuild
     model: mujoco.MjModel
     data: mujoco.MjData
+    slots: list[tuple[int, int]]  # (body id, geom id) per slot
     renderers: dict[tuple[int, int], mujoco.Renderer] = field(default_factory=dict)
 
     def close(self) -> None:
@@ -88,37 +105,81 @@ class _Compiled:
 
 
 class EgoViewRenderer:
-    def __init__(self) -> None:
-        self._compiled: dict[str, _Compiled] = {}
+    """Renders one robot's Ego-State from a free camera."""
 
-    def render(self, robot_id: str, ego: dict, camera: dict, width: int, height: int, fmt: str = "png") -> bytes:
+    def __init__(self) -> None:
+        self._compiled: _Compiled | None = None
+
+    def render(self, ego: dict, settings: ViewSettings) -> bytes:
+        """Render one JPEG frame of an Ego-State.
+
+        :param ego: the Ego-State as a SceneState dict.
+        :param settings: camera and image size.
+        :returns: the encoded image.
+        """
+        camera = settings.camera
         az = math.radians(float(camera["azimuth"]))
         toward_camera = np.zeros(2) if float(camera["elevation"]) < -80 else np.array([-math.cos(az), -math.sin(az)])
         room_center = [float(camera["lookat"][0]), float(camera["lookat"][1])]
         scene = ego_render_scene(ego, toward_camera, room_center)
-        structure = tuple((e.id, e.rigid.root.value, len(e.rigid.links)) for e in scene.entities)
-        compiled = self._compiled.get(robot_id)
+        fixed = [e for e in scene.entities if e.role == "robot" or e.id == FLOOR_ID or len(e.rigid.links) > 1]
+        boxes = [(e, g) for e in scene.entities if e not in fixed for g in e.rigid.links[0].geometry.get("collision", [])]
+        capacity = max(SLOT_MIN, 1 << max(0, len(boxes) - 1).bit_length())
+        structure = (tuple((e.id, e.rigid.root.value, len(e.rigid.links)) for e in fixed), capacity)
+        compiled = self._compiled
         if compiled is None or compiled.structure != structure:
             if compiled is not None:
                 compiled.close()
-            build = build_mjcf(scene)
-            model = build.compile()
-            data = mujoco.MjData(model)
-            build.apply_initial(model, data)
-            compiled = _Compiled(structure, build, model, data)
-            self._compiled[robot_id] = compiled
+            compiled = self._compile(scene, fixed, capacity, structure)
+            self._compiled = compiled
         else:
-            self._update(compiled, scene)
-        if (width, height) not in compiled.renderers:
-            compiled.renderers[(width, height)] = mujoco.Renderer(compiled.model, height, width)
-        renderer = compiled.renderers[(width, height)]
+            self._update(compiled, fixed)
+        self._fill_slots(compiled, boxes)
+        mujoco.mj_kinematics(compiled.model, compiled.data)
+        mujoco.mj_camlight(compiled.model, compiled.data)
+        key = (settings.width, settings.height)
+        if key not in compiled.renderers:
+            compiled.renderers[key] = mujoco.Renderer(compiled.model, settings.height, settings.width)
+        renderer = compiled.renderers[key]
         renderer.update_scene(compiled.data, camera=free_camera(camera))
-        return encode_image(renderer.render(), fmt)
+        return encode_image(renderer.render(), "jpeg")
 
     @staticmethod
-    def _update(compiled: _Compiled, scene: SceneState) -> None:
+    def _compile(scene: SceneState, fixed: list, capacity: int, structure: tuple) -> _Compiled:
+        data = scene.to_dict()
+        data["entities"] = [e.to_dict() for e in fixed] + [_slot_entity(k) for k in range(capacity)]
+        build = build_mjcf(SceneState.from_dict(data))
+        model = build.compile()
+        mj_data = mujoco.MjData(model)
+        build.apply_initial(model, mj_data)
+        slots = []
+        for k in range(capacity):
+            body = build.names[f"e:render-slot-{k}"].bodies["slot"]
+            slots.append((mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, body),
+                          mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, f"{body}::c0")))
+        return _Compiled(structure, build, model, mj_data, slots)
+
+    @staticmethod
+    def _fill_slots(compiled: _Compiled, boxes: list) -> None:
+        model = compiled.model
+        for (bid, gid), item in zip(compiled.slots, [*boxes, *[None] * (len(compiled.slots) - len(boxes))], strict=True):
+            if item is None:
+                model.geom_group[gid] = HIDDEN_GROUP
+                continue
+            ent, geom = item
+            pose = pose_compose(ent.pose.value, geom.get("pose") or {"p": [0, 0, 0], "q": [1, 0, 0, 0]})
+            model.body_pos[bid] = pose["p"]
+            model.body_quat[bid] = pose["q"]
+            half = [s / 2 for s in geom["size"]]
+            model.geom_size[gid] = half
+            model.geom_rbound[gid] = float(np.linalg.norm(half))
+            model.geom_rgba[gid] = geom.get("rgba", [*DEFAULT_RGB, 1.0])
+            model.geom_group[gid] = 0
+
+    @staticmethod
+    def _update(compiled: _Compiled, entities: list) -> None:
         model, data = compiled.model, compiled.data
-        for ent in scene.entities:
+        for ent in entities:
             names = compiled.build.names[ent.id]
             p, q = ent.pose.value["p"], ent.pose.value["q"]
             root = ent.rigid.root.value
@@ -138,16 +199,8 @@ class EgoViewRenderer:
                 if joint.id in names.joints and joint.q.value:
                     jid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, names.joints[joint.id])
                     data.qpos[model.jnt_qposadr[jid]] = joint.q.value[0]
-            if ent.role != "robot":
-                for k, geom in enumerate(ent.rigid.links[0].geometry.get("collision", [])):
-                    gid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, f"{names.bodies[ent.rigid.links[0].id]}::c{k}")
-                    if geom["shape"] == "box":
-                        model.geom_size[gid] = [s / 2 for s in geom["size"]]
-                    if "rgba" in geom:
-                        model.geom_rgba[gid] = geom["rgba"]
-        mujoco.mj_forward(model, data)
 
     def close(self) -> None:
-        for compiled in self._compiled.values():
-            compiled.close()
-        self._compiled.clear()
+        if self._compiled is not None:
+            self._compiled.close()
+            self._compiled = None

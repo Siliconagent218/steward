@@ -2,12 +2,15 @@
 
 Every response is derived from the Ego-State and the robot's own receipts and jobs. A client may
 take exclusive control (``/ego/control``); skill and explore requests then carry ``owner``.
+``/ego/view`` sets the camera, rate and size of the rendered Ego-State view and
+``/ego/view/frame`` returns its newest frame (``204`` when none is newer than ``after``).
 """
 
 from __future__ import annotations
 
 from steward.ego.runtime import EgoRuntime
-from steward.net import HttpError, JsonServer
+from steward.net import NO_CONTENT, HttpError, JsonServer
+from steward.viewloop import ViewSettings, frame_response
 
 
 def ego_api(runtime: EgoRuntime, port: int = 0) -> JsonServer:
@@ -34,6 +37,17 @@ def ego_api(runtime: EgoRuntime, port: int = 0) -> JsonServer:
                              goal=str(b.get("goal") or ""), step=str(b.get("step") or ""),
                              diagnosis=str(b.get("diagnosis") or ""))
 
+    def view_frame(q):
+        frame = runtime.view.latest(int(q["after"]) if q.get("after") else None)
+        if frame is not None:
+            return frame_response(frame, runtime.view.status())
+        status = runtime.view.status()
+        if status["settings"] is None:
+            raise HttpError(409, "the ego view is not configured; POST /ego/view first")
+        if status["error"] and status["frame"] is None:
+            raise HttpError(503, f"the ego view cannot render: {status['error']}")
+        return NO_CONTENT
+
     def control(b):
         if b.get("action") == "acquire":
             return runtime.acquire_control(b.get("owner", ""))
@@ -52,6 +66,9 @@ def ego_api(runtime: EgoRuntime, port: int = 0) -> JsonServer:
         ("GET", "/ego/alerts"): lambda q, b: runtime.alerts_view(),
         ("POST", "/ego/alert"): lambda q, b: report(b),
         ("POST", "/ego/alerts/ack"): lambda q, b: runtime.acknowledge(b.get("id")),
+        ("GET", "/ego/view"): lambda q, b: runtime.view.status(),
+        ("POST", "/ego/view"): lambda q, b: runtime.view.configure(ViewSettings.parse(b)),
+        ("GET", "/ego/view/frame"): lambda q, b: view_frame(q),
         ("GET", "/ego/plan"): lambda q, b: runtime.plan_view(),
         ("POST", "/ego/plan"): lambda q, b: runtime.set_plan(b),
         ("POST", "/ego/control"): lambda q, b: control(b),

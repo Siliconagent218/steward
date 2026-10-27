@@ -29,10 +29,10 @@ def test_running_clock_restarts_after_reset_and_does_not_jump_on_speed_change(ki
 
 def test_free_camera_view_hides_walls_on_the_camera_side_only(kitchen_scene):
     sim = WorldSim(kitchen_scene)
-    south = sim._cutaway_walls({"azimuth": 90, "elevation": -50})
-    southeast = sim._cutaway_walls({"azimuth": 135, "elevation": -45})
+    south = sim.cutaway_walls({"azimuth": 90, "elevation": -50})
+    southeast = sim.cutaway_walls({"azimuth": 135, "elevation": -45})
     assert len(south) == 1 and len(southeast) == 2
-    assert sim._cutaway_walls({"azimuth": 90, "elevation": -89}) == []
+    assert sim.cutaway_walls({"azimuth": 90, "elevation": -89}) == []
     groups = sim.model.geom_group.copy()
     png = sim.render({"lookat": [0, 0, 0.5], "distance": 8, "azimuth": 90, "elevation": -50}, 160, 120)
     assert png.startswith(b"\x89PNG")
@@ -42,7 +42,8 @@ def test_free_camera_view_hides_walls_on_the_camera_side_only(kitchen_scene):
 def test_ego_view_rebuilds_do_not_corrupt_world_renders(kitchen_scene):
     from steward.assets.generators import steward_bot
     from steward.ego.estimator import EgoEstimator
-    from steward.world.ego_view import EgoViewRenderer
+    from steward.ego.view import EgoViewRenderer
+    from steward.viewloop import ViewSettings
 
     sim = WorldSim(kitchen_scene, seed=1)
     camera = {"lookat": [0, 0, 0.5], "distance": 8, "azimuth": 90, "elevation": -50}
@@ -52,7 +53,7 @@ def test_ego_view_rebuilds_do_not_corrupt_world_renders(kitchen_scene):
     for _ in range(3):
         est.update(sim.sensors("w:robot-1"))
         est.tracks.pop(next(iter(est.tracks)), None)  # change the entity set to force a rebuild
-        assert view.render("w:robot-1", est.to_scene().to_dict(), camera, 160, 120).startswith(b"\x89PNG")
+        assert view.render(est.to_scene().to_dict(), ViewSettings(camera, 10, 160, 120)).startswith(b"\xff\xd8")
     view.close()
     assert sim.render(camera, 160, 120) == before
     sim.stop()

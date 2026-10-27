@@ -31,7 +31,7 @@ from steward.scene.mjcf import MjcfBuild, build_mjcf
 from steward.scene.schema import Relation, RigidTree, SceneState, exact
 
 _COLLISION_GROUPS = np.array([1, 0, 0, 1, 0, 0], dtype=np.uint8)
-_HIDDEN_GROUP = 4  # not drawn by MuJoCo's default visualisation options
+HIDDEN_GROUP = 4  # not drawn by MuJoCo's default visualisation options
 _JOINT_WIDTH = {int(mujoco.mjtJoint.mjJNT_FREE): (7, 6), int(mujoco.mjtJoint.mjJNT_BALL): (4, 3),
                 int(mujoco.mjtJoint.mjJNT_SLIDE): (1, 1), int(mujoco.mjtJoint.mjJNT_HINGE): (1, 1)}
 
@@ -901,11 +901,11 @@ class WorldSim:
                 self._renderers[key] = mujoco.Renderer(self.model, height, width)
             renderer = self._renderers[key]
             if isinstance(camera, dict):
-                hidden = self._cutaway_walls(camera)
+                hidden = self.cutaway_walls(camera)
                 saved = {gid: int(self.model.geom_group[gid]) for gid in hidden}
                 try:
                     for gid in hidden:
-                        self.model.geom_group[gid] = _HIDDEN_GROUP
+                        self.model.geom_group[gid] = HIDDEN_GROUP
                     renderer.update_scene(self.data, camera=free_camera(camera))
                 finally:
                     for gid, group in saved.items():
@@ -914,7 +914,7 @@ class WorldSim:
                 renderer.update_scene(self.data, camera=camera)
         return encode_image(renderer.render(), fmt)
 
-    def _cutaway_walls(self, spec: dict) -> list[int]:
+    def cutaway_walls(self, spec: dict) -> list[int]:
         """Geoms of environment walls on the camera side of the room, hidden in free-camera views
         so the camera looks into the room (rendering only; physics and robot cameras keep them)."""
         az, el = math.radians(float(spec["azimuth"])), math.radians(float(spec["elevation"]))

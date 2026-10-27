@@ -117,7 +117,7 @@
     <option value="4">4×</option><option value="8">8×</option>
   </select>
   <select id="phase" title="功能级别：系统各模块运行在哪个 Phase 的实现上；运行中可切换，用于对比与调试"></select>
-  <select id="fps" title="渲染帧率：世界视图、自我态视图与机器人相机每秒最多请求的帧数；控制台状态刷新最多每秒 5 次">
+  <select id="fps" title="渲染帧率：世界视图（主机渲染线程）与自我态视图（机器人端渲染线程）按同一帧时钟以此帧率渲染；机器人相机按此帧率请求；控制台状态刷新最多每秒 5 次">
     <option value="25">25 fps</option><option value="10">10 fps</option><option value="5">5 fps</option>
     <option value="3">3 fps</option><option value="1">1 fps</option>
   </select>
@@ -219,8 +219,8 @@ const COLOR_NAMES = { red: '红', green: '绿', blue: '蓝', black: '黑', clear
 const RENDER_W = 1024, RENDER_H = 768;
 let state = null, robotId = null, view = null, viewKey = '';
 const panes = {
-  world: { img: 'imgWorld', overlay: 'ovWorld', label: 'fpsWorld', rendered: null, busy: false, shown: null, meter: null },
-  ego: { img: 'imgEgo', overlay: 'ovEgo', label: 'fpsEgo', rendered: null, busy: false, shown: null, meter: null },
+  world: { img: 'imgWorld', overlay: 'ovWorld', label: 'fpsWorld', rendered: null, busy: false, shown: null, index: null },
+  ego: { img: 'imgEgo', overlay: 'ovEgo', label: 'fpsEgo', rendered: null, busy: false, shown: null, index: null },
 };
 
 // -------------------------------------------------------------- frame rate
@@ -236,6 +236,17 @@ function rateMeter() {
     while (frames.length && frames[0] < now - 3000) frames.shift();
     return frames.length > 1 ? (frames.length - 1) * 1000 / (now - frames[0]) : 0;
   };
+}
+async function ticked(task) {
+  // Fetch just after each tick of the shared frame clock (tick k at k / fps s of Unix time), when
+  // both renderers have produced frame k.
+  for (;;) {
+    const now = Date.now() / 1000, next = (Math.floor(now * fps) + 1) / fps;
+    await sleep((next - now) * 1000 + Math.min(60, 300 / fps));
+    if (!document.hidden) {
+      try { await task(); } catch (e) { /* a failed fetch is retried on the next tick */ }
+    }
+  }
 }
 async function paced(task, rate) {
   let due = performance.now();
@@ -353,30 +364,49 @@ function cameraQuery(cam) {
   return `lookat=${cam.lookat.join(',')}&distance=${cam.distance}&azimuth=${cam.azimuth}&elevation=${cam.elevation}`
     + `&width=${RENDER_W}&height=${RENDER_H}&format=jpeg`;
 }
-async function requestRender(name) {
+async function pullFrame(name) {
   const pane = panes[name], img = $(pane.img);
   if (!view || pane.busy) return;
-  if (name === 'ego' && !(state && robotId && state.robots[robotId] && state.robots[robotId].ego)) return;
+  if (name === 'ego' && !robotId) return;
   pane.busy = true;
   try {
-    const cam = { ...view };
-    const url = name === 'world'
-      ? `/wca/render?camera=free&${cameraQuery(cam)}`
-      : `/console/ego-render?robot=${encodeURIComponent(robotId)}&${cameraQuery(cam)}`;
-    const res = await fetch(url, { cache: 'no-store' });
-    if (!res.ok) return;
+    const after = pane.index == null ? '' : `&after=${pane.index}`;
+    const robot = name === 'ego' ? `&robot=${encodeURIComponent(robotId)}` : '';
+    const res = await fetch(`/console/frame?view=${name}${robot}${after}`, { cache: 'no-store' });
+    if (res.status === 204) return;
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      $(pane.label).textContent = `· ${data.error || `HTTP ${res.status}`}`;
+      return;
+    }
+    const index = Number(res.headers.get('X-Frame-Index'));
+    const camera = JSON.parse(res.headers.get('X-Frame-Camera'));
     pane.shown = await showBlob(img, res, pane.shown);
-    pane.rendered = cam;
-    pane.meter = pane.meter || rateMeter();
-    $(pane.label).textContent = `· ${pane.meter().toFixed(1)} fps`;
+    pane.index = index;
+    pane.rendered = { ...camera, fovy: view.fovy };
+    $(pane.label).textContent = `· ${Number(res.headers.get('X-Render-Fps')).toFixed(1)} fps · 帧 #${index % 100000}`;
     if (name === 'ego') $('egoEmpty').style.display = 'none';
     drawOverlays();
   } finally {
     pane.busy = false;
   }
 }
-function requestRenders() { requestRender('world'); requestRender('ego'); }
-function setView(v) { view = v; requestRenders(); }
+let viewPosting = false, viewDirty = false;
+async function postView() {
+  // Both renderers follow one set of view settings; while a post is in flight, only the newest
+  // camera is sent after it.
+  if (!view) return;
+  if (viewPosting) { viewDirty = true; return; }
+  viewPosting = true;
+  try {
+    const { lookat, distance, azimuth, elevation } = view;
+    await api('POST', '/console/view', { camera: { lookat, distance, azimuth, elevation }, fps, width: RENDER_W, height: RENDER_H });
+  } catch (e) { showError(e); } finally {
+    viewPosting = false;
+    if (viewDirty) { viewDirty = false; postView(); }
+  }
+}
+function setView(v) { view = v; postView(); }
 
 // -------------------------------------------------------------- mouse orbit
 for (const id of ['vpWorld', 'vpEgo']) {
@@ -388,14 +418,14 @@ for (const id of ['vpWorld', 'vpEgo']) {
     if (!drag) return;
     view = { ...view, azimuth: drag.az - (e.clientX - drag.x) * 0.35,
       elevation: Math.max(-89, Math.min(-8, drag.el - (e.clientY - drag.y) * 0.3)) };
-    panes.world.rendered = view; panes.ego.rendered = view; drawOverlays(); requestRenders();
+    panes.world.rendered = view; panes.ego.rendered = view; drawOverlays(); postView();
     document.querySelectorAll('[data-view]').forEach(b => b.classList.remove('on'));
   });
-  const end = () => { if (drag) { drag = null; vp.classList.remove('dragging'); requestRenders(); } };
+  const end = () => { if (drag) { drag = null; vp.classList.remove('dragging'); postView(); } };
   vp.addEventListener('pointerup', end); vp.addEventListener('pointercancel', end);
   vp.addEventListener('wheel', (e) => { if (!view) return; e.preventDefault();
     view = { ...view, distance: Math.max(1, Math.min(40, view.distance * (e.deltaY > 0 ? 1.1 : 1 / 1.1))) };
-    requestRenders(); }, { passive: false });
+    postView(); }, { passive: false });
 }
 document.querySelectorAll('[data-view]').forEach(btn => btn.onclick = () => {
   if (!state || !state.loaded) return;
@@ -412,7 +442,7 @@ async function refresh() {
     robotId = robotId && state.robots[robotId] ? robotId : Object.keys(state.robots)[0];
     const key = `${state.scenario}|${state.view.lookat}|${state.view.distance}`;
     if (key !== viewKey) { viewKey = key; view = presetView('south'); panes.world.rendered = panes.ego.rendered = null;
-      requestRenders(); document.querySelectorAll('[data-view]').forEach(b => b.classList.toggle('on', b.dataset.view === 'south')); }
+      postView(); document.querySelectorAll('[data-view]').forEach(b => b.classList.toggle('on', b.dataset.view === 'south')); }
     $('clock').textContent = `t = ${state.t.toFixed(1)} s`;
     renderPhase(state.phase);
     $('task').textContent = state.task ? `任务：${state.task}` : '';
@@ -700,11 +730,12 @@ $('speed').onchange = async () => { try { await api('POST', '/wca/clock', { acti
 for (const id of ['showGtLabels', 'showEgoLabels', 'showSigma', 'showError']) $(id).onchange = drawOverlays;
 
 $('fps').value = String(fps);
-$('fps').onchange = () => { fps = Number($('fps').value); localStorage.setItem(FPS_KEY, String(fps)); };
+$('fps').onchange = () => { fps = Number($('fps').value); localStorage.setItem(FPS_KEY, String(fps)); postView(); };
 refresh().then(loadScenarios);
 paced(refresh, () => Math.min(fps, 5));
-paced(() => requestRender('world'), () => fps);
-paced(() => requestRender('ego'), () => fps);
+ticked(() => pullFrame('world'));
+ticked(() => pullFrame('ego'));
+setInterval(postView, 5000);
 paced(refreshRobotCamera, () => fps);
 refreshChat();
 setInterval(refreshChat, 800);

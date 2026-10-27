@@ -1,6 +1,8 @@
 """MuJoCo rendering helpers shared by WSim, asset previews and the Ego-State view.
 
-All rendering runs on the process main thread (macOS OpenGL rule).
+Each renderer is created, used and closed on one thread, which owns its OpenGL context: WSim
+sensor images and asset previews on the process main thread, console views on their view loop
+threads (:mod:`steward.viewloop`).
 """
 
 from __future__ import annotations
