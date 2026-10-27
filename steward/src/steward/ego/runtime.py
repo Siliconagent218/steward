@@ -83,10 +83,9 @@ class EgoRuntime:
         self._alert_ids = itertools.count(1)
         self.executor = SkillExecutor(self.link.command, self._motion_state, self._mark_held, self.config.motion,
                                       shift=self._shift_track, on_error=lambda msg: self.alert(msg, "skill"))
+        self._view_scene: tuple[dict, int, float] | None = None  # (ES dict, version, stamp) for the view
         renderer = EgoViewRenderer()
-        self.view = ViewLoop("ego", lambda settings: (
-            renderer.render(self.ego_state().to_dict(), settings), "image/jpeg",
-            {"esVersion": self.estimator.version, "t": round(self.estimator.stamp, 3)}), renderer.close)
+        self.view = ViewLoop("ego", lambda settings: self._render_view(renderer, settings), renderer.close)
 
     # --------------------------------------------------------------- lifecycle
     def start(self) -> None:
@@ -119,11 +118,27 @@ class EgoRuntime:
                 if rgbd["header"]["stamp"] < self.estimator.stamp - 1e-6:
                     self._restart()
                 self.estimator.update_rgbd(rgbd)
+                self._publish_view_scene()
             return
         with self._lock:
             if frame["stamp"] < self.estimator.stamp - 1e-6:
                 self._restart()
             self.estimator.update(frame)
+            self._publish_view_scene()
+
+    def _publish_view_scene(self) -> None:
+        """Hand the view a copy of the Ego-State taken right after a perception update (the caller
+        holds the lock), so rendering never waits for the next update to finish."""
+        self._view_scene = (self.estimator.to_scene().to_dict(), self.estimator.version, self.estimator.stamp)
+
+    def _render_view(self, renderer: EgoViewRenderer, settings) -> tuple[bytes, str, dict]:
+        scene = self._view_scene
+        if scene is None:
+            with self._lock:
+                self._publish_view_scene()
+            scene = self._view_scene
+        ego, version, stamp = scene
+        return renderer.render(ego, settings), "image/jpeg", {"esVersion": version, "t": round(stamp, 3)}
 
     def _restart(self) -> None:
         """The world clock went backwards: a new episode started, which the robot experiences as a
