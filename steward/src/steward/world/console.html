@@ -85,7 +85,7 @@
                    padding: 14px; pointer-events: none; animation: alertPulse 1.1s ease-in-out infinite; }
   .alert-overlay[hidden] { display: none; }
   @keyframes alertPulse { 0%, 100% { background: rgba(225, 30, 30, 0.45); } 50% { background: rgba(225, 30, 30, 0.06); } }
-  .alert-box { pointer-events: auto; max-width: 92%; background: #2a0f12f0; border: 1px solid #ff6b6b; color: #ffd6d6;
+  .alert-box { pointer-events: auto; max-width: 92%; max-height: 92%; overflow-y: auto; background: #2a0f12f0; border: 1px solid #ff6b6b; color: #ffd6d6;
                border-radius: 8px; padding: 10px 12px; font-size: 13px; white-space: pre-wrap; }
   .alert-box b { color: #ff8a8a; display: block; margin-bottom: 4px; }
   .alert-box button { margin-top: 8px; border-color: #ff6b6b; }
@@ -601,7 +601,9 @@ function renderAlerts(alerts) {
   if (!alerts.length) { box.hidden = true; return; }
   const last = alerts[alerts.length - 1];
   const more = alerts.length > 1 ? `（另有 ${alerts.length - 1} 条未确认）` : '';
-  $('egoAlertText').textContent = `${ALERT_SOURCES[last.source] || last.source}：${last.message}`
+  const context = [['goal', '目标'], ['step', '当前步骤'], ['diagnosis', '自我诊断']]
+    .filter(([key]) => last[key]).map(([key, label]) => `${label}：${last[key]}`).join('\n');
+  $('egoAlertText').textContent = `${context ? context + '\n' : ''}${ALERT_SOURCES[last.source] || last.source}：${last.message}`
     + `${last.count > 1 ? ` ×${last.count}` : ''}${more}`;
   box.hidden = false;
 }

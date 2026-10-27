@@ -57,6 +57,7 @@ class RobotLink:
         return call("GET", f"{self.url}/camera/rgb?width={width}&height={height}")
 
 
+ALERT_TEXT_MAX = 1500
 PLAN_STEP_STATES = frozenset({"pending", "active", "done", "failed", "skipped"})
 
 class EgoRuntime:
@@ -277,17 +278,25 @@ class EgoRuntime:
         return self.receipts[receipt_id]
 
     # ------------------------------------------------------------------ alerts
-    def alert(self, message: str, source: str, level: str = "error") -> dict:
+    def alert(self, message: str, source: str, level: str = "error", goal: str = "", step: str = "",
+              diagnosis: str = "") -> dict:
         """Record a situation the robot cannot resolve by itself (an unexpected exception, or a
-        problem its agent reports). A repeat of an unacknowledged message only bumps its count."""
+        problem its agent or mission reports) with the goal and step it was pursuing and the
+        reporter's own diagnosis. A goal or step left empty is taken from the published plan. A
+        repeat of an unacknowledged message only bumps its count."""
+        message = message[:ALERT_TEXT_MAX]
         with self._lock:
+            plan = self.plan or {}
             for existing in reversed(self.alerts):
-                if not existing["acknowledged"] and existing["message"] == message[:600]:
+                if not existing["acknowledged"] and existing["message"] == message:
                     existing["count"] += 1
                     existing["t"] = round(self.estimator.stamp, 2)
                     return existing
             record = {"id": next(self._alert_ids), "t": round(self.estimator.stamp, 2), "level": level,
-                      "source": source, "message": message[:600], "count": 1, "acknowledged": False}
+                      "source": source, "message": message, "count": 1, "acknowledged": False,
+                      "goal": (goal or plan.get("goal", ""))[:ALERT_TEXT_MAX],
+                      "step": (step or plan.get("current", ""))[:ALERT_TEXT_MAX],
+                      "diagnosis": diagnosis[:ALERT_TEXT_MAX]}
             self.alerts.append(record)
             del self.alerts[:-50]
             return record

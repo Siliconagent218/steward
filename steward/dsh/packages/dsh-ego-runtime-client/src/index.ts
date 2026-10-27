@@ -6,7 +6,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { EgoError, EgoService } from '@steward/dsh-ego'
-import type { EgoQuery, EgoSkill, JsonObject, PredictionReceipt, SkillJob } from '@steward/dsh-ego'
+import type { EgoQuery, EgoSkill, JsonObject, PredictionReceipt, ProblemReport, SkillJob } from '@steward/dsh-ego'
 import { baseUrl, HttpJsonError, requestJson } from '@steward/http-json'
 
 /** Validated plugin configuration. */
@@ -92,8 +92,8 @@ export class EgoRuntimeClient extends EgoService {
     return this.call('POST', '/skill/stop', {}, signal)
   }
 
-  reportProblem(message: string, signal?: AbortSignal): Promise<JsonObject> {
-    return this.call('POST', '/ego/alert', { message, source: 'agent', level: 'blocked' }, signal)
+  reportProblem(report: ProblemReport, signal?: AbortSignal): Promise<JsonObject> {
+    return this.call('POST', '/ego/alert', { ...report, source: 'agent', level: 'blocked' }, signal)
   }
 }
 

@@ -65,6 +65,18 @@ export interface PredictionReceipt {
 }
 
 /** One skill execution. */
+/** A problem the robot cannot resolve by itself, as the operator console shows it. */
+export interface ProblemReport {
+  /** What the robot is trying to achieve. */
+  goal: string
+  /** The step it was carrying out when it got stuck. */
+  step: string
+  /** Its own analysis of its tool log: the dominant cause and the evidence for it. */
+  diagnosis: string
+  /** What happened, what was tried, and what the operator needs to do. */
+  message: string
+}
+
 export interface SkillJob {
   id: string
   skill: string
@@ -172,9 +184,9 @@ export abstract class EgoService extends Service {
   /**
    * Tell the operator about a situation the robot cannot resolve by itself; the Steward console
    * shows it as an alert until the operator acknowledges it.
-   * @param message - what went wrong and what the robot needs.
+   * @param report - the goal, the step, the robot's own diagnosis, and what it needs.
    * @param signal - caller cancellation.
    * @returns the recorded alert.
    */
-  abstract reportProblem(message: string, signal?: AbortSignal): Promise<JsonObject>
+  abstract reportProblem(report: ProblemReport, signal?: AbortSignal): Promise<JsonObject>
 }

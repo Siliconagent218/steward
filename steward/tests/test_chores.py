@@ -213,8 +213,8 @@ def test_a_chair_blocking_the_sideboard_is_moved_out_of_the_way_before_the_drawe
     api = ego_api(runtime).start()
     steps: list[str] = []
     try:
-        before = drawer_contents(host.sim.world_state())
         _explore(api.url, 120)
+        before = drawer_contents(host.sim.world_state())  # contents are known once the simulation has stepped
         Chores(api.url, on_step=lambda r: steps.append(r["text"])).swap_drawers()
         ok, detail = check_swap(before, host.sim.world_state())
         assert ok, detail
@@ -236,25 +236,35 @@ def test_a_repeating_failure_is_recognised_whatever_its_numbers():
     assert a != _signature("table", "cannot open e:10: ['dock pose in front of e:10 collides with e:5'] at 1.23")
 
 
-def test_a_round_without_progress_triggers_self_rescue_then_an_operator_alert(monkeypatch):
+def test_a_round_without_progress_triggers_self_rescue_then_a_diagnosed_operator_alert(monkeypatch):
     import steward.chores as chores_mod
     from steward.mission import MissionFailed
 
     events: list[str] = []
-    messages = iter(f"failure number {n} of a different kind {'x' * n}" for n in range(100))
+    reports: list[dict] = []
+    messages = iter(["navigate failed: base is blocked: no progress for 2 s (0.24 m from the waypoint)",
+                     "navigate failed: turn did not converge (yaw error 0.14 rad)",
+                     "open failed: missed the handle of e:30"] * 4)
+    summary = {"self": {"x": 0.02, "y": -2.17, "yawDeg": 0.0, "holding": None},
+               "objects": [{"id": "e:8", "category": "wall", "existence": 1.0, "position": [0.0, -2.5, 0.76],
+                            "extentM": [5.8, 0.06, 1.48], "sizeM": [5.8, 0.1, 1.5], "yawDeg": 0.0,
+                            "categoryConfidence": 1.0, "categories": {"wall": 1.0}}]}
 
     class Stop(Exception):
         pass
 
     def fail(self):
+        self._doing("把红碗 e:9 放到餐桌第 1 位")
         raise MissionFailed(next(messages))
 
-    def alert(api, text, on_wait=None):
+    def alert(api, report, on_wait=None):
         events.append("alert")
-        raise Stop(text)
+        reports.append(report)
+        raise Stop(report["message"])
 
     monkeypatch.setattr(chores_mod, "_explore", lambda api, timeout_s: {"state": "succeeded"})
     monkeypatch.setattr(chores_mod, "_wait_for_control", lambda api, on_wait=None: None)
+    monkeypatch.setattr(chores_mod, "_summary", lambda api: summary)
     monkeypatch.setattr(chores_mod, "_report_livelock", alert)
     monkeypatch.setattr(chores_mod.Chores, "publish", lambda self, **changes: events.append(changes.get("state", "")))
     monkeypatch.setattr(chores_mod.Chores, "recover", lambda self, message="": None)
@@ -266,6 +276,11 @@ def test_a_round_without_progress_triggers_self_rescue_then_an_operator_alert(mo
     actions = [e for e in events if e in ("escape", "alert", "escaping", "waiting-operator")]
     assert actions == ["escaping", "escape", "waiting-operator", "alert"], events
     assert events.count("recovering") == 6, "three failed phases before the rescue and three after it"
+    report = reports[0]
+    assert "第 2 轮" in report["goal"] and report["step"] == "把红碗 e:9 放到餐桌第 1 位"
+    assert "底盘受阻" in report["diagnosis"] and "6 次失败中 4 次" in report["diagnosis"]
+    assert "基本没有移动" in report["diagnosis"] and "wall e:8 0.30 米" in report["diagnosis"]
+    assert "Ego State 里没有 table" in report["diagnosis"]
 
 
 def test_one_chores_round_is_confirmed_by_world_state(kitchen_root, tmp_path):

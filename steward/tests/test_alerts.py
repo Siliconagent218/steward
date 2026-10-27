@@ -75,7 +75,7 @@ def test_robot_alerts_are_printed_in_the_chat_and_returned_for_the_ego_view(tmp_
         api.stop()
 
 
-def test_a_published_plan_is_validated_and_shown_with_the_running_skill(tmp_path):
+def test_a_published_plan_is_shown_and_gives_alerts_their_goal_and_step(tmp_path):
     runtime = EgoRuntime(RobotLink("http://127.0.0.1:1"), steward_bot().to_dict())
     api = ego_api(runtime).start()
     home = tmp_path / "robot-1"
@@ -96,5 +96,14 @@ def test_a_published_plan_is_validated_and_shown_with_the_running_skill(tmp_path
         assert view["plan"]["state"] == "escaping" and view["plan"]["round"] == 3
         assert [st["status"] for st in view["plan"]["steps"]] == ["failed", "pending"]
         assert view["skill"] is None
+        runtime.alert("技能 pick 出现未预料的异常：AssertionError: boom", "skill")
+        call("POST", f"{api.url}/ego/alert", {"message": "抓取两次失败", "goal": "把红碗放到操作台", "step": "抓取 e:4",
+                                              "diagnosis": "主要原因是抓取未对准"})
+        skill_alert, agent_alert = call("GET", f"{api.url}/ego/alerts")["active"]
+        assert (skill_alert["goal"], skill_alert["step"]) == ("家务循环", "自救：后撤"), "context comes from the plan"
+        assert (agent_alert["goal"], agent_alert["step"], agent_alert["diagnosis"]) == \
+            ("把红碗放到操作台", "抓取 e:4", "主要原因是抓取未对准")
+        printed = [m["text"] for m in chat.state()["messages"] if m["role"] == "error"]
+        assert "当前步骤：自救：后撤" in printed[0] and "自我诊断：主要原因是抓取未对准" in printed[1]
     finally:
         api.stop()

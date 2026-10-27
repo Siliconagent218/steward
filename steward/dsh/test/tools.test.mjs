@@ -26,7 +26,7 @@ function fakeEgo(receipts = {}) {
     job: async () => job('succeeded'),
     wait: async (id, timeoutS) => { calls.push(['wait', id, timeoutS]); return job('succeeded') },
     stop: async () => ({ stopped: null }),
-    reportProblem: async (message) => { calls.push(['report', message]); return { id: 1, message } },
+    reportProblem: async (report) => { calls.push(['report', report]); return { id: 1, ...report } },
   }
 }
 
@@ -77,11 +77,12 @@ test('world_edit maps floor and support placements to World Control API edits', 
   await assert.rejects(edit.execute({ action: 'spawn', entity: 'w:x', asset: 'cup' }, exec('world_edit')), /needs a placement/)
 })
 
-test('report_problem forwards the message to the operator alert', async () => {
+test('report_problem forwards the goal, step, diagnosis and message to the operator alert', async () => {
   const ego = fakeEgo()
-  const result = await tool(egoTools(ego), 'report_problem').execute({ message: 'stuck' }, exec('report_problem'))
-  assert.deepEqual(ego.calls.at(-1), ['report', 'stuck'])
-  assert.equal(result.message, 'stuck')
+  const report = { goal: '把红碗放到操作台', step: '抓取 e:4', diagnosis: '抓取两次都没对准：e:4 位置不确定度 4 cm', message: '请检查碗的位置' }
+  const result = await tool(egoTools(ego), 'report_problem').execute({ ...report, extra: 'dropped' }, exec('report_problem'))
+  assert.deepEqual(ego.calls.at(-1), ['report', report])
+  assert.equal(result.diagnosis, report.diagnosis)
 })
 
 test('safety policy denies skill_run without a receipt, with an unknown one, or above the risk limit', async () => {

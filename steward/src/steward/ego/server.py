@@ -30,7 +30,9 @@ def ego_api(runtime: EgoRuntime, port: int = 0) -> JsonServer:
         message = str(b.get("message", "")).strip()
         if not message:
             raise ValueError("an alert needs a message")
-        return runtime.alert(message, str(b.get("source", "agent")), str(b.get("level", "blocked")))
+        return runtime.alert(message, str(b.get("source", "agent")), str(b.get("level", "blocked")),
+                             goal=str(b.get("goal") or ""), step=str(b.get("step") or ""),
+                             diagnosis=str(b.get("diagnosis") or ""))
 
     def control(b):
         if b.get("action") == "acquire":

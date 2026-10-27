@@ -171,14 +171,20 @@ export function egoTools(ego: EgoService): ToolDefinition[] {
     defineTool({
       name: 'report_problem',
       description: 'Alert the operator that you hit a situation you cannot resolve by yourself: an unexpected '
-        + 'error, a skill that keeps failing, or a task that cannot be done from here. The operator console shows '
-        + 'the message as an alert. Say what happened, what you tried, and what you need. Call it once, then stop.',
+        + 'error, a skill that keeps failing, or a task that cannot be done from here. Before calling, review your own '
+        + 'tool calls in this turn and diagnose: which prediction or skill failed, the error text, how often it '
+        + 'repeated, where you were, and how it relates to blockers, uncertainty, or missing or duplicate objects in '
+        + 'the ego state. The operator console shows the report as an alert. Call it once, then stop.',
       parameters: {
-        message: { type: 'string', required: true, description: 'What went wrong, what you tried, what you need.' },
+        goal: { type: 'string', required: true, description: 'What you are trying to achieve.' },
+        step: { type: 'string', required: true, description: 'The step you were carrying out when you got stuck.' },
+        diagnosis: { type: 'string', required: true, description: 'The cause you diagnosed from your tool log and the evidence for it.' },
+        message: { type: 'string', required: true, description: 'What happened, what you tried, and what you need from the operator.' },
       },
       output: { schema: JSON_OUTPUT, render: (_a, v) => text(v) },
       async execute(args, exec) {
-        return json(await ego.reportProblem(args.message, exec.signal))
+        const { goal, step, diagnosis, message } = args
+        return json(await ego.reportProblem({ goal, step, diagnosis, message }, exec.signal))
       },
     }),
   ]

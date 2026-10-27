@@ -44,8 +44,10 @@ ROBOT_BRIEF = (
     "每个动作先用 ego_predict 得到收据，风险超限就先靠近观察再预测，然后用 skill_run 执行；"
     "执行后用 ego_state 自查结果。完成或无法完成时，用一两句中文向操作员汇报。\n"
     "不要反复试错：ego_predict 的 issues 里给出建议时（例如「原地放下」的参数）先照做；同一个目标连续 3 次预测都不可行，"
-    "或同一个技能失败 2 次，就停止尝试：调用 report_problem 报告遇到的情况、已经尝试过什么、需要操作员做什么，"
-    "然后向操作员说明。遇到工具报错或异常且无法绕过时，同样调用 report_problem。\n"
+    "或同一个技能失败 2 次，就停止尝试并调用 report_problem，然后向操作员说明。遇到工具报错或异常且无法绕过时，同样调用 report_problem。"
+    "报告前先回看你自己这一轮的工具调用记录做诊断：哪个技能或预测失败、报错原文、重复了几次、失败时你在哪里、"
+    "和 blockers、不确定度、Ego State 里缺失或重复的物体有什么关系；报告里写清你要达成的目标、卡在哪一步、"
+    "诊断出的原因和依据、已经尝试过什么、需要操作员做什么。\n"
     "先想清楚为什么不可行：预测结果的 blockers 列出挡路的物体；如果是可搬动的（movable，例如椅子），"
     "先把它搬到 parkAt 给出的不碍事位置，再重新预测原来的动作；不可搬动的障碍才需要换做法或报告。\n\n操作员任务："
 )
@@ -247,7 +249,9 @@ class HarnessChat:
                 self._seen_alerts.add(alert["id"])
                 source = {"agent": "机器人智能体", "skill": "技能执行", "runtime": "感知", "api": "Ego API",
                           "harness": "Ego Harness", "mission": "家务任务"}.get(alert["source"], alert["source"])
-                self._add("robot", "error", f"⚠ 机器人遇到无法自行处理的情况（{source}）：{alert['message']}")
+                context = "".join(f"\n{label}：{alert[key]}" for key, label in
+                                  (("goal", "目标"), ("step", "当前步骤"), ("diagnosis", "自我诊断")) if alert.get(key))
+                self._add("robot", "error", f"⚠ 机器人遇到无法自行处理的情况（{source}）：{alert['message']}{context}")
         return active
 
     def _robot_plan(self) -> dict | None:

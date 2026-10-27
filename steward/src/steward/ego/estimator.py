@@ -206,10 +206,11 @@ class EgoEstimator:
                 # Neighbouring tableware stands ~0.2 m apart: the gate scales with the object size.
                 spread = 3.0 * math.sqrt(float(np.mean(track.var[:2])))
                 gate = max(0.10, 0.6 * max(track.footprint, m["footprint"]) + spread, 0.45 if track.held else 0.0)
-                # A part of a large object (a table top seen up close, one end of a counter) lies inside
-                # its box and below its top; something standing on it starts at or above the top.
+                # A part of a large object (a table top seen up close, a closed drawer front) lies wholly
+                # inside its box and below its top; something standing on it starts at or above the top,
+                # and an open drawer reaches out of it.
                 m_bottom, m_top = m["centre"][2] - m["size"][2] / 2, m["centre"][2] + m["size"][2] / 2
-                part_of_large = track.footprint > 0.3 and _inside(track, m["centre"], 0.1) \
+                part_of_large = track.footprint > 0.3 and _footprint_inside(track, m, 0.05) \
                     and m_top <= track.top() + 0.1 and m_bottom < track.top() - 0.02
                 if d > gate and not part_of_large:
                     continue
@@ -217,6 +218,8 @@ class EgoEstimator:
                     abs(math.log(max(m["footprint"], 1e-3) / max(track.footprint, 1e-3)))
                 if size_r > 0.9:
                     continue
+                if not track.held and track.observations >= 5 and m["footprint"] > 1.5 * track.footprint:
+                    continue  # partial views only shrink a well-seen object; a much larger region is something else
                 if not track.held and not part_of_large and self._contradicts(track, m):
                     continue
                 if (track.category == "wall") != (m["probs"].get("wall", 0.0) > 0.5) and \
@@ -806,6 +809,14 @@ def _to_local_xy(track: Track, point: np.ndarray) -> tuple[float, float]:
 def _sigma_z(a: Track, b: Track) -> float:
     """Standard deviation of the height difference between two tracks."""
     return math.sqrt(float(a.var[2] + b.var[2]))
+
+
+def _footprint_inside(track: Track, m: dict, margin: float) -> bool:
+    """Whether all four corners of a measurement's box lie inside the track's box."""
+    c, s = math.cos(m["yaw"]), math.sin(m["yaw"])
+    hx, hy = m["size"][0] / 2, m["size"][1] / 2
+    return all(_inside(track, np.array([m["centre"][0] + c * dx - s * dy, m["centre"][1] + s * dx + c * dy]), margin)
+               for dx in (-hx, hx) for dy in (-hy, hy))
 
 
 def _inside(track: Track, point: np.ndarray, margin: float) -> bool:
