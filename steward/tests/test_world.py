@@ -39,6 +39,25 @@ def test_free_camera_view_hides_walls_on_the_camera_side_only(kitchen_scene):
     assert (sim.model.geom_group == groups).all(), "rendering must restore the wall geoms"
 
 
+def test_ego_view_rebuilds_do_not_corrupt_world_renders(kitchen_scene):
+    from steward.assets.generators import steward_bot
+    from steward.ego.estimator import EgoEstimator
+    from steward.world.ego_view import EgoViewRenderer
+
+    sim = WorldSim(kitchen_scene, seed=1)
+    camera = {"lookat": [0, 0, 0.5], "distance": 8, "azimuth": 90, "elevation": -50}
+    before = sim.render(camera, 160, 120)
+    est = EgoEstimator(robot_model=steward_bot().to_dict())
+    view = EgoViewRenderer()
+    for _ in range(3):
+        est.update(sim.sensors("w:robot-1"))
+        est.tracks.pop(next(iter(est.tracks)), None)  # change the entity set to force a rebuild
+        assert view.render("w:robot-1", est.to_scene().to_dict(), camera, 160, 120).startswith(b"\x89PNG")
+    view.close()
+    assert sim.render(camera, 160, 120) == before
+    sim.stop()
+
+
 def test_render_from_worker_thread_is_served_by_main_thread_pump(kitchen_scene):
     sim = WorldSim(kitchen_scene)
     result: dict = {}

@@ -22,6 +22,7 @@ from steward.authoring.service import AuthoringError, AuthoringService
 from steward.net import Binary, HttpError, JsonServer
 from steward.observer.observer import Observer
 from steward.world.console import CONSOLE_HTML, console_state
+from steward.world.ego_view import EgoViewRenderer
 from steward.world.sim import WorldSim
 
 
@@ -47,6 +48,7 @@ class StewardHost:
         self._robot_port_config = robot_ports or {}
         self.robot_servers: dict[str, JsonServer] = {}
         self._main_tasks: queue.Queue[_MainTask] = queue.Queue()
+        self.ego_view = EgoViewRenderer()
         if scenario is not None:
             self.load_episode(scenario)
 
@@ -114,6 +116,8 @@ class StewardHost:
         for server in self.robot_servers.values():
             server.stop()
         self.wca.stop()
+        if threading.current_thread() is threading.main_thread():
+            self.ego_view.close()
         if self.sim is not None:
             self.sim.stop()
 
@@ -178,10 +182,25 @@ class StewardHost:
         def console_page(q, b):
             return Binary(CONSOLE_HTML.read_bytes(), "text/html; charset=utf-8")
 
+        def ego_render(q, b):
+            robot = q.get("robot") or next(iter(self.robot_servers), None)
+            ego = self.observer.latest_ego.get(robot) if robot else None
+            if ego is None:
+                raise HttpError(404, f"no ego state received from {robot!r} yet")
+            try:
+                camera = {"lookat": [float(v) for v in q["lookat"].split(",")], "distance": float(q["distance"]),
+                          "azimuth": float(q["azimuth"]), "elevation": float(q["elevation"])}
+            except (KeyError, ValueError) as exc:
+                raise HttpError(400, f"ego render needs lookat=x,y,z, distance, azimuth, elevation: {exc}") from None
+            width, height = int(q.get("width", 800)), int(q.get("height", 600))
+            png = self.on_main(lambda: self.ego_view.render(robot, ego, camera, width, height))
+            return Binary(png, "image/png")
+
         return {
             ("GET", "/"): console_page,
             ("GET", "/console"): console_page,
             ("GET", "/console/state"): guard(lambda q, b: console_state(self)),
+            ("GET", "/console/ego-render"): guard(ego_render),
             ("GET", "/wca/status"): guard(lambda q, b: {"scenario": (self.scenario or {}).get("name"),
                                                         **(self.sim.status() if self.sim else {"loaded": False})}),
             ("GET", "/wca/scene"): guard(lambda q, b: self._require_sim().world_state()),

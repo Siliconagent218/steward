@@ -24,6 +24,7 @@ import mujoco
 import numpy as np
 from PIL import Image
 
+from steward.glrender import close_renderer, free_camera
 from steward.math3d import matrix_from_quat, pose_compose, pose_inverse, quat_from_yaw, quat_mul, quat_normalize
 from steward.scene.extent import entity_body_ids, entity_obb
 from steward.scene.mjcf import MjcfBuild, build_mjcf
@@ -49,18 +50,6 @@ class PerceptionConfig:
 @dataclass
 class GraspConfig:
     capture_radius: float = 0.06
-
-
-def _free_camera(spec: dict) -> mujoco.MjvCamera:
-    """MuJoCo free camera: it looks along (cos el cos az, cos el sin az, sin el) at ``lookat``
-    from ``distance`` away; a negative elevation looks down."""
-    cam = mujoco.MjvCamera()
-    cam.type = mujoco.mjtCamera.mjCAMERA_FREE
-    cam.lookat[:] = [float(v) for v in spec["lookat"]]
-    cam.distance = float(spec["distance"])
-    cam.azimuth = float(spec["azimuth"])
-    cam.elevation = float(spec["elevation"])
-    return cam
 
 
 @dataclass
@@ -111,6 +100,8 @@ class WorldSim:
         self.build.apply_initial(self.model, self.data)
         self.rng = np.random.default_rng(self._seed)
         self.robots = {e.id: _RobotState(e.id) for e in self.template.entities if e.role == "robot"}
+        for renderer in getattr(self, "_renderers", {}).values():
+            close_renderer(renderer)
         self._epoch = getattr(self, "_epoch", 0) + 1
         self._renderers: dict[tuple[int, int], mujoco.Renderer] = {}
         self._body_entity: dict[int, str] = {}
@@ -162,7 +153,7 @@ class WorldSim:
             self._thread = None
         with self.lock:
             for r in self._renderers.values():
-                r.close()
+                close_renderer(r)
             self._renderers.clear()
 
     def _loop(self) -> None:
@@ -497,7 +488,7 @@ class WorldSim:
                 try:
                     for gid in hidden:
                         self.model.geom_group[gid] = _HIDDEN_GROUP
-                    renderer.update_scene(self.data, camera=_free_camera(camera))
+                    renderer.update_scene(self.data, camera=free_camera(camera))
                 finally:
                     for gid, group in saved.items():
                         self.model.geom_group[gid] = group

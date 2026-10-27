@@ -8,6 +8,7 @@ import mujoco
 import numpy as np
 from PIL import Image
 
+from steward.glrender import close_renderer
 from steward.scene.extent import entity_obb
 from steward.scene.mjcf import build_mjcf
 from steward.scene.schema import Entity, SceneState, exact, pose
@@ -52,5 +53,5 @@ def render_scene(scene: SceneState, cameras: list[dict], out_dir: Path, stem: st
             Image.fromarray(img).save(path)
             paths.append(path)
     finally:
-        renderer.close()
+        close_renderer(renderer)
     return paths
