@@ -238,19 +238,26 @@ def _closest_point(obj: dict, p: tuple[float, float]) -> tuple[float, float]:
 
 
 def _ego_state_findings(summary: dict, needs: dict[str, int]) -> list[str]:
+    """The objects the failed work needs, by role: missing (with the likeliest candidates),
+    duplicated, or held with little confidence (with the rival categories)."""
     out = []
     objects = [o for o in summary["objects"] if o["existence"] >= 0.5]
     for category, expected in needs.items():
         found = [o for o in objects if o.get("role", o["category"]) == category]
         zh = CATEGORY_ZH.get(category, category)
         if not found:
-            out.append(f"Ego State 里没有{zh}，需要它的步骤都无法规划")
+            candidates = sorted((o for o in objects if o["categories"].get(category, 0.0) >= 0.1),
+                                key=lambda o: -o["categories"][category])[:2]
+            hint = ("；最可能的候选是 " + "、".join(f"{describe(o)}（是{zh}的概率 {o['categories'][category]:.2f}）" for o in candidates)
+                    if candidates else "，也没有像它的物体")
+            out.append(f"Ego State 里没有{zh}{hint}，需要它的步骤都无法规划")
         elif len(found) > expected:
             out.append(f"Ego State 里有 {len(found)} 个{zh}（任务只需要 {expected} 个），可能有重复轨迹或把别的物体认成了它："
                        + "、".join(f"{o['id']} 在 ({o['position'][0]:.2f}, {o['position'][1]:.2f})" for o in found))
         for o in found:
-            if o["categoryConfidence"] < LOW_CONFIDENCE:
+            confidence = o.get("roleConfidence", o["categoryConfidence"])
+            if confidence < LOW_CONFIDENCE:
                 rivals = sorted(((p, c) for c, p in o["categories"].items() if c != category), reverse=True)[:2]
-                out.append(f"{o['id']} 被认作{zh}的把握只有 {o['categoryConfidence']:.2f}（其次 "
+                out.append(f"{o['id']} 被认作{zh}的把握只有 {confidence:.2f}（其次 "
                            + "、".join(f"{CATEGORY_ZH.get(c, c)} {p:.2f}" for p, c in rivals) + "）")
     return out

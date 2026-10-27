@@ -310,3 +310,26 @@ def test_one_chores_round_is_confirmed_by_world_state(kitchen_root, tmp_path):
         api.stop()
         runtime.stop()
         host.stop()
+
+
+def test_a_doubtful_or_missing_role_is_looked_at_from_closer_before_acting(monkeypatch):
+    import steward.chores as chores_mod
+
+    def board(confidence, role="sideboard"):
+        return {"id": "e:21", "category": "counter", "role": role, "roleConfidence": confidence, "existence": 1.0,
+                "categories": {"counter": 0.5, "sideboard": 0.45}, "position": [-2.7, 0.6, 0.43], "color": None}
+
+    views = iter([{"objects": [board(0.45)]}, {"objects": [board(0.72)]}])
+    looked: list[str] = []
+    monkeypatch.setattr(chores_mod, "_summary", lambda api: next(views))
+    monkeypatch.setattr(chores_mod, "_approach_to_observe", lambda api, obj, distance=1.1: looked.append(obj["id"]))
+    monkeypatch.setattr(chores_mod.time, "sleep", lambda s: None)
+    runner = Chores("http://unused")
+    monkeypatch.setattr(runner, "publish", lambda **changes: None)
+    assert runner._confirmed("sideboard")["id"] == "e:21" and looked == ["e:21"]
+    assert "把握只有 0.45" in runner.attempt
+
+    views = iter([{"objects": [board(0.9, role="counter")]}, {"objects": [board(0.8)]}])
+    looked.clear()
+    assert runner._confirmed("sideboard")["id"] == "e:21" and looked == ["e:21"], "the likeliest candidate is looked at"
+    assert runner.attempt.startswith("寻找餐边柜")

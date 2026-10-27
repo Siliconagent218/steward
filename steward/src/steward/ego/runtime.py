@@ -85,6 +85,7 @@ class EgoRuntime:
         self.perception_mode: str | None = None
         self.alerts: list[dict] = []
         self.plan: dict | None = None
+        self._roles: dict[str, str] = {}  # the latest role assignment, kept unless clearly outweighed
         self.activity: collections.deque[dict] = collections.deque(maxlen=ACTIVITY_MAX)
         self._activity_ids = itertools.count(1)
         self._alert_ids = itertools.count(1)
@@ -237,7 +238,9 @@ class EgoRuntime:
                 **({"openingM": round(self._opening(ent.id), 3)} if ent.category.value == "drawer" else {}),
                 **self._front(ent),
             })
-        roles = assign_roles(objects, self.config.roles)
+        with self._lock:
+            roles = assign_roles(objects, self.config.roles, self._roles)
+            self._roles = {oid: role for oid, (role, _) in roles.items()}
         for obj in objects:
             obj["role"], confidence = roles[obj["id"]]
             obj["roleConfidence"] = round(confidence, 3)

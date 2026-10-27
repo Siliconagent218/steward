@@ -20,7 +20,7 @@ import math
 import re
 import time
 
-from steward.diagnosis import Diagnosis, describe, diagnose
+from steward.diagnosis import CATEGORY_ZH, Diagnosis, describe, diagnose
 from steward.mission import (
     Blocked,
     MissionFailed,
@@ -216,6 +216,34 @@ class Chores:
                 return
         raise MissionFailed(f"picked {blocker['id']} but none of the parking spots {spots} is reachable")
 
+    def _confirmed(self, role: str) -> dict:
+        """The object playing ``role`` in the Ego-State, made sure of before it is acted on: while its
+        role is doubtful the robot looks at it from closer, and when no object has the role it looks
+        at the likeliest candidate, instead of failing on a confused category."""
+        zh = CATEGORY_ZH.get(role, role)
+        for attempt in range(CONFIRM_TRIES + 1):
+            s = _summary(self.api)
+            found = _objects(s, role)
+            last = attempt == CONFIRM_TRIES
+            if not found:
+                candidates = [o for o in s["objects"] if o["existence"] >= 0.5 and o["categories"].get(role, 0.0) >= CANDIDATE_MIN]
+                if not candidates or last:
+                    raise MissionFailed(f"no {role} in the ego state")
+                cand = max(candidates, key=lambda o: o["categories"][role])
+                self._doing(f"寻找{zh}：没有物体被认作{zh}，靠近最可能的候选{describe(cand)}（是{zh}的概率 "
+                            f"{cand['categories'][role]:.2f}）观察")
+                _approach_to_observe(self.api, cand, distance=CONFIRM_DISTANCE)
+                time.sleep(1.5)
+                continue
+            obj = max(found, key=lambda o: o["existence"])
+            confidence = obj.get("roleConfidence", 1.0)
+            if confidence >= CONFIRM_CONFIDENCE or last:
+                return obj
+            self._doing(f"确认{describe(obj)}：它是{zh}的把握只有 {confidence:.2f}，先靠近观察")
+            _approach_to_observe(self.api, obj, distance=CONFIRM_DISTANCE)
+            time.sleep(1.5)
+        raise MissionFailed(f"no {role} in the ego state")
+
     def _step(self, phase: str, text: str, **extra) -> None:
         record = {"phase": phase, "text": text, **extra}
         self.log.append(record)
@@ -251,12 +279,12 @@ class Chores:
 
     # ------------------------------------------------------------------ table
     def arrange_on_table(self) -> list[str]:
-        table = _one(_summary(self.api), "table")
+        table = self._confirmed("table")
         # Plan the row only after a close look: a transparent glass is not detected in every frame.
         _approach_to_observe(self.api, table, distance=1.3)
         time.sleep(2.0)
         s = _summary(self.api)
-        table = _one(s, "table")
+        table = _refresh(self.api, table)
         items = tableware(s)
         if len(items) < 2:
             raise MissionFailed(f"only {len(items)} pieces of tableware are known")
@@ -276,8 +304,8 @@ class Chores:
 
     # -------------------------------------------------------------- sideboard
     def stack_on_sideboard(self) -> None:
+        board = self._confirmed("sideboard")
         s = _summary(self.api)
-        board = _one(s, "sideboard")
         bowls = sorted(_objects(s, "bowl"), key=_area, reverse=True)
         others = sorted([o for cat in TABLEWARE if cat != "bowl" for o in _objects(s, cat)], key=_area, reverse=True)
         widths = ([_width(bowls[0])] if bowls else []) + [_width(o) for o in others]
@@ -346,8 +374,7 @@ class Chores:
         self._step("drawers", "关上抽屉", object=drawer["id"])
 
     def swap_drawers(self) -> None:
-        s = _summary(self.api)
-        board, cabinet = _one(s, "sideboard"), _one(s, "cabinet")
+        board, cabinet = self._confirmed("sideboard"), self._confirmed("cabinet")
         a = self._open(board)
         a_items = [o["id"] for o in _summary(self.api)["objects"] if o["on"] == a["id"]]
         b = self._open(cabinet)
@@ -454,6 +481,10 @@ PHASE_DETAILS = {"table": "餐具在餐桌上按占地大小排成一排", "side
                  "drawers": "打开两个抽屉，对调里面的物品，再关上"}
 PHASE_NEEDS = {"table": {"table": 1}, "sideboard": {"sideboard": 1}, "drawers": {"sideboard": 1, "cabinet": 1, "drawer": 2}}
 UNSTICK_M = 0.35
+CONFIRM_CONFIDENCE = 0.6  # a role less sure than this is checked from closer before acting on it
+CONFIRM_TRIES = 2
+CONFIRM_DISTANCE = 1.3
+CANDIDATE_MIN = 0.1  # least probability of the wanted category for an object worth a closer look
 FAILURE_HISTORY = 8
 PERCEPTION_FAILURES = ("ego state", "no drawer seen", "not seen", "lost")
 LIVELOCK_REPEATS = 2

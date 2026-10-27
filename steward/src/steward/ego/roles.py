@@ -24,7 +24,7 @@ class RoleConfig:
 
     singletons: tuple[str, ...] = ("table", "sideboard", "cabinet", "counter")
     """Categories of which the home has exactly one: two objects never share such a role."""
-    confusable: tuple[tuple[str, ...], ...] = (("table", "sideboard", "cabinet", "counter"), ("mug", "cup"))
+    confusable: tuple[tuple[str, ...], ...] = (("table", "sideboard", "cabinet", "counter"), ("mug", "cup"), ("bowl", "plate"))
     """Groups of categories that partial views confuse; roles move only within a group."""
     min_probability: float = 0.08
     """A category less likely than this is not considered as the object's role."""
@@ -32,9 +32,14 @@ class RoleConfig:
     """Factor on the drawer-bearing categories of furniture that holds a perceived drawer."""
     min_existence: float = 0.5
     """Objects less likely to exist than this take no part in the assignment."""
+    nested_evidence: float = 3.0
+    """Factor on ``bowl`` for a flat object resting on a bowl: a nested bowl seen only by its rim."""
+    stickiness: float = 1.5
+    """Factor on the role an object had in the previous assignment, so that roles do not swap
+    between two similar objects from one view to the next (a robot sent back and forth)."""
 
 
-def assign_roles(objects: list[dict], config: RoleConfig) -> dict[str, tuple[str, float]]:
+def assign_roles(objects: list[dict], config: RoleConfig, previous: dict[str, str] | None = None) -> dict[str, tuple[str, float]]:
     """Role and its probability within its confusion group for every object of an Ego API summary.
 
     Within each group, (object, category) pairs are taken from the most to the least probable; a
@@ -46,9 +51,19 @@ def assign_roles(objects: list[dict], config: RoleConfig) -> dict[str, tuple[str
     :param objects: summary objects with ``id``, ``category``, ``categories``, ``existence``,
         ``position``, ``yawDeg`` and ``extentM`` or ``sizeM``.
     :param config: the robot's knowledge of its home.
+    :param previous: the roles of the previous assignment, which are kept unless the evidence
+        against them is clearly stronger.
     :returns: ``{object id: (role, probability)}``.
     """
+    previous = previous or {}
     probs = {o["id"]: dict(o["categories"]) for o in objects}
+    bowls = {o["id"] for o in objects if max(o["categories"], key=o["categories"].get) == "bowl"}
+    for o in objects:
+        p = probs[o["id"]]
+        if o.get("on") in bowls and "plate" in p:
+            p["bowl"] = p.get("bowl", 0.0) + p["plate"] * (config.nested_evidence - 1.0)
+            total = sum(p.values())
+            probs[o["id"]] = {k: v / total for k, v in p.items()}
     drawers = [o for o in objects if o["category"] == "drawer" and o["existence"] >= config.min_existence]
     for o in objects:
         if o["category"] != "drawer" and any(_holds(o, d) for d in drawers):
@@ -62,7 +77,8 @@ def assign_roles(objects: list[dict], config: RoleConfig) -> dict[str, tuple[str
     for group in config.confusable:
         members = [o["id"] for o in objects if o["existence"] >= config.min_existence
                    and max(probs[o["id"]], key=probs[o["id"]].get) in group]
-        pairs = sorted(((probs[oid].get(c, 0.0), oid, c) for oid in members for c in group
+        held = lambda oid, c: config.stickiness if previous.get(oid) == c else 1.0  # noqa: E731
+        pairs = sorted(((probs[oid].get(c, 0.0) * held(oid, c), oid, c) for oid in members for c in group
                         if probs[oid].get(c, 0.0) >= config.min_probability), reverse=True)
         taken: set[str] = set()
         chosen: dict[str, str] = {}

@@ -67,3 +67,23 @@ def test_a_second_one_of_a_kind_object_is_not_given_the_taken_role():
     roles = assign_roles([*SCENE, corner], RoleConfig())
     assert roles["e:40"][0] == "counter" and roles["e:39"][0] == "sideboard"
     assert roles["e:132"][0] == "unknown", "the home's one counter and one sideboard are elsewhere"
+
+
+def test_roles_stay_put_between_views_unless_the_evidence_clearly_turns():
+    a = _obj("e:1", "sideboard", {"sideboard": 0.48, "counter": 0.42, "table": 0.1}, [-2.7, 0.6, 0.43], [1.4, 0.47, 0.84])
+    b = _obj("e:2", "sideboard", {"sideboard": 0.46, "counter": 0.44, "table": 0.1}, [0.0, 2.1, 0.46], [1.8, 0.6, 0.9])
+    first = {k: v[0] for k, v in assign_roles([a, b], RoleConfig()).items()}
+    assert first == {"e:1": "sideboard", "e:2": "counter"}
+    a["categories"] = {"sideboard": 0.45, "counter": 0.45, "table": 0.1}
+    b["categories"] = {"sideboard": 0.47, "counter": 0.43, "table": 0.1}
+    assert {k: v[0] for k, v in assign_roles([a, b], RoleConfig(), first).items()} == first, "a small swing keeps the roles"
+    b["categories"] = {"sideboard": 0.9, "counter": 0.05, "table": 0.05}
+    assert assign_roles([a, b], RoleConfig(), first)["e:2"][0] == "sideboard", "clear evidence still wins"
+
+
+def test_a_flat_object_resting_on_a_bowl_is_a_nested_bowl():
+    bowl = _obj("e:5", "bowl", {"bowl": 1.0}, [-2.78, 0.41, 0.89], [0.25, 0.25, 0.08])
+    rim = {**_obj("e:6", "plate", {"plate": 0.86, "bowl": 0.14}, [-2.8, 0.45, 0.89], [0.17, 0.16, 0.02]), "on": "e:5"}
+    loose = _obj("e:7", "plate", {"plate": 0.86, "bowl": 0.14}, [1.0, -1.5, 0.76], [0.24, 0.24, 0.02])
+    roles = assign_roles([bowl, rim, loose], RoleConfig())
+    assert roles["e:6"][0] == "bowl" and roles["e:7"][0] == "plate"

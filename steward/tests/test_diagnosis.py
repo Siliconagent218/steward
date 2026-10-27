@@ -67,3 +67,10 @@ def test_diagnosis_names_the_repeated_blocker_and_tableware_lying_on_the_floor()
     assert "停靠位或路径 2 次被 餐桌 e:7 挡住" in text
     assert "操作目标 碗 e:16 在地面上" in text and "误认成了餐具" in text
     assert "抓取 碗 e:16 失败 2 次：2 个方向的停靠位被 餐桌 e:7 挡住；高度 0.03 米超出升降范围" in text
+
+
+def test_a_missing_role_is_reported_with_its_likeliest_candidates():
+    summary = {"self": {"x": 0.0, "y": 0.0, "yawDeg": 0.0, "holding": None}, "objects": [
+        {**_obj("e:39", "counter", (-2.7, 0.6), [1.4, 0.47, 0.84], 0.55, {"counter": 0.55, "sideboard": 0.4}), "role": "counter"}]}
+    text = diagnose([{"message": "no sideboard in the ego state", "pose": None}], summary, {"sideboard": 1}).text
+    assert "最可能的候选是 操作台 e:39（是餐边柜的概率 0.40）" in text
