@@ -138,6 +138,9 @@ class EgoEstimator:
         self.gripper = frame["gripper"]
         if not self.gripper.get("holding"):
             self._clear_held()
+        # A held object moves with this frame's body pose; update it before association so a
+        # turning robot does not see its own load as a new object.
+        self._follow_held()
         cam = self.camera_pose()
         measurements = []
         for det in frame.get("detections", []):
@@ -163,7 +166,7 @@ class EgoEstimator:
         detected box centre moves with the visible portion."""
         gate = max(self.config.gate_m, 3.0 * math.sqrt(float(np.mean(track.var)) + sigma**2),
                    self.config.size_gate_ratio * float(max(track.size[0], track.size[1])))
-        return max(gate, 0.15) if track.held else gate
+        return max(gate, 0.45) if track.held else gate
 
     def _size_match(self, a: float, b: float) -> bool:
         """Footprints of the same object agree within the detector's size noise; nested bowls do not."""

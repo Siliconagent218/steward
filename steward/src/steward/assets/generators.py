@@ -279,6 +279,22 @@ def scissors(length: float = 0.17, mass: float = 0.08) -> Entity:
     return _entity("scissors", "object", "free", [half("blade_a", t / 2, 1.0), half("blade_b", t * 1.5 + 0.0005, -1.0)], [pivot])
 
 
+def chair(seat: float = 0.46, seat_height: float = 0.46, back_height: float = 0.9, mass: float = 5.0) -> Entity:
+    """Dining chair standing on four legs; the backrest is on the -x side, so the chair faces +x."""
+    leg, t = 0.04, 0.04
+    geoms = [primitive("box", [seat, seat, t], pose([0, 0, seat_height - t / 2]), LIGHT_WOOD)]
+    for sx in (-1, 1):
+        for sy in (-1, 1):
+            geoms.append(primitive("box", [leg, leg, seat_height - t],
+                                   pose([sx * (seat / 2 - leg / 2), sy * (seat / 2 - leg / 2), (seat_height - t) / 2]), WOOD))
+    back_h = back_height - seat_height
+    geoms.append(primitive("box", [t, seat, back_h], pose([-seat / 2 + t / 2, 0, seat_height + back_h / 2]), WOOD))
+    link = Link(id="body", name="chair", geometry={"collision": geoms}, inertial=exact({"mass": mass}),
+                material=exact({"friction": 0.8, "fragility": 0.1}),
+                affordances=[exact("graspable"), exact("support-surface")])
+    return _entity("chair", "object", "free", [link])
+
+
 def steward_bot(camera_pitch_deg: float = 30.0, camera_fovy_deg: float = 60.0) -> Entity:
     """Phase 0 mobile manipulator: planar base, vertical lift, horizontal reach, ideal gripper.
 
@@ -356,5 +372,6 @@ GENERATORS: dict[str, Callable[..., Entity]] = {
     "mug": mug,
     "teddy_bear": teddy_bear,
     "scissors": scissors,
+    "chair": chair,
     "steward_bot": steward_bot,
 }

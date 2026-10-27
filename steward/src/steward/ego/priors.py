@@ -25,6 +25,8 @@ CATEGORY_PRIORS: dict[str, dict] = {
     "mug": {"role": "object", "root": {"free": 1.0}, "affordances": ["graspable", "container"], "fragility": 0.4},
     "teddy_bear": {"role": "object", "root": {"free": 1.0}, "affordances": ["graspable"], "fragility": 0.0},
     "scissors": {"role": "object", "root": {"free": 1.0}, "affordances": ["graspable"], "fragility": 0.0},
+    "chair": {"role": "object", "root": {"free": 0.95, "fixed": 0.05}, "affordances": ["graspable", "floor-standing"],
+              "fragility": 0.1},
 }
 
 UNKNOWN_PRIOR = {"role": "object", "root": {"free": 0.5, "fixed": 0.5}, "affordances": [], "fragility": 0.5}

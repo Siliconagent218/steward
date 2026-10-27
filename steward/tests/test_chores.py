@@ -119,6 +119,39 @@ def test_row_offsets_space_items_by_width_around_the_centre():
     assert offsets == pytest.approx([-0.30, -0.10, 0.20])
 
 
+def test_a_chair_is_carried_and_put_down_on_the_floor(kitchen_root, tmp_path):
+    from steward.net import call
+
+    host = StewardHost(kitchen_root, scenario="phase0-chores", speed=6.0, seed=3, run_dir=tmp_path).start()
+    record = AuthoringService(kitchen_root).library.get("chair")
+    host.sim.edit_spawn("w:chair-1", record["template"], {"at": {"x": -0.25, "y": -0.9, "yaw": 0.0}}, {"id": "chair"})
+    runtime = EgoRuntime(RobotLink(host.robot_servers["w:robot-1"].url), steward_bot().to_dict())
+    runtime.start()
+    api = ego_api(runtime).start()
+
+    def run(skill: str, params: dict) -> dict:
+        receipt = call("POST", f"{api.url}/ego/predict", {"skill": skill, "params": params})
+        assert receipt["withinRiskLimit"], receipt["issues"]
+        job = call("POST", f"{api.url}/skill/run", {"receipt": receipt["id"]})
+        return call("POST", f"{api.url}/skill/wait", {"job": job["id"], "timeoutS": 120}, timeout=130)
+
+    try:
+        _explore(api.url, 120)
+        chairs = [o for o in call("GET", f"{api.url}/ego/summary")["objects"] if o["category"] == "chair"]
+        assert len(chairs) == 1
+        assert run("pick", {"target": chairs[0]["id"]})["state"] == "succeeded"
+        assert run("place", {"at": [-2.05, 0.05], "yaw": math.pi})["state"] == "succeeded"
+        pose = host.sim._entity_pose("w:chair-1")
+        assert pose["p"][0] == pytest.approx(-2.05, abs=0.04) and pose["p"][1] == pytest.approx(0.05, abs=0.04)
+        assert pose["p"][2] == pytest.approx(0.0, abs=0.01), "the chair stands on the floor"
+        chairs = [o for o in call("GET", f"{api.url}/ego/summary")["objects"] if o["category"] == "chair"]
+        assert len(chairs) == 1, "carrying the chair must not leave phantom chairs in the ego state"
+    finally:
+        api.stop()
+        runtime.stop()
+        host.stop()
+
+
 def test_one_chores_round_is_confirmed_by_world_state(kitchen_root, tmp_path):
     host = StewardHost(kitchen_root, scenario="phase0-chores", speed=10.0, seed=5, run_dir=tmp_path).start()
     runtime = EgoRuntime(RobotLink(host.robot_servers["w:robot-1"].url), steward_bot().to_dict())

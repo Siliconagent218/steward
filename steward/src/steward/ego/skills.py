@@ -116,6 +116,8 @@ class SkillExecutor:
                 self._drive(job, plan["path"], plan["yaw"])
             elif skill == "pick":
                 self._pick(job, plan)
+            elif skill == "place" and "floor" in plan:
+                self._place_floor(job, plan)
             elif skill == "place":
                 self._place(job, plan)
             elif skill in ("open", "close"):
@@ -218,8 +220,9 @@ class SkillExecutor:
         while self._tick()["stamp"] - t0 < seconds:
             pass
 
-    def _dock(self, job: Job, plan: dict) -> None:
-        self._set_joint("reach", self.config.retract_reach)
+    def _dock(self, job: Job, plan: dict, retract: bool = True) -> None:
+        if retract:
+            self._set_joint("reach", self.config.retract_reach)
         self._drive(job, plan["path"], plan["yaw"])
         self._translate_to(plan["dock"][0], plan["dock"][1], plan["yaw"])
         o = self._state()["odometry"]
@@ -296,7 +299,9 @@ class SkillExecutor:
         self._mark_held(plan["target"])
         job.log.append(f"grasped {plan['target']}")
         self._set_joint("lift", plan["carryLift"])
-        self._set_joint("reach", self.config.retract_reach)
+        if plan.get("support") != "floor":
+            # Objects taken from the floor are large; the arm stays out so they clear the base.
+            self._set_joint("reach", self.config.retract_reach)
         self._backoff(plan)
         job.message = f"holding {plan['target']}"
 
@@ -351,3 +356,16 @@ class SkillExecutor:
         self._translate_to(plan["viewing"][0], plan["viewing"][1], plan["yaw"])
         self._set_joint("lift", self.config.stow_lift)
         job.message = f"{verb} {plan['drawer']}"
+
+    def _place_floor(self, job: Job, plan: dict) -> None:
+        """Drive in with the held object, lower it to just above the floor, release and back away.
+
+        The arm keeps its carrying reach: retracting it would pull the object over the base."""
+        self._dock(job, plan, retract=False)
+        self._set_joint("lift", plan["lift"])
+        self._command({"gripper": "open"})
+        self._wait(0.6)
+        job.log.append(f"released {plan['object']} on the floor at ({plan['floor'][0]:.2f}, {plan['floor'][1]:.2f})")
+        self._backoff(plan)
+        self._set_joint("lift", self.config.stow_lift)
+        job.message = f"placed {plan['object']} on the floor"

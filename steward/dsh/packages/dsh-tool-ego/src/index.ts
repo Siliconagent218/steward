@@ -103,23 +103,27 @@ export function egoTools(ego: EgoService): ToolDefinition[] {
         + 'issues found (for example a target whose position is too uncertain to grasp reliably), and the planned '
         + 'motion. Skills: "navigate" (needs x, y, optional yaw in radians), "pick" (needs target), "place" (needs '
         + 'on: a surface, an open drawer to put the object into, or a larger bowl to nest a bowl in; optional offset '
-        + '[dx, dy] in metres in the surface frame), "open" / "close" (needs target: a drawer; the robot pulls or '
-        + 'pushes its handle and ends standing back so the inside is in view). Objects inside a drawer are only '
-        + 'seen while it is open. If the risk is too high, follow the issues (for example move closer and observe) '
-        + 'and predict again. A receipt can be run once and expires.',
+        + '[dx, dy] in metres in the surface frame; or at: [x, y] to put it down on the floor, optional yaw for its '
+        + 'final heading in radians), "open" / "close" (needs target: a drawer; the robot pulls or pushes its handle '
+        + 'and ends standing back so the inside is in view). Floor-standing objects such as chairs are picked from '
+        + 'beside them, carried a few centimetres above the floor in front of the robot, and put down with at; '
+        + 'while carrying them the robot needs more room to turn. Objects inside a drawer are only seen while it is '
+        + 'open. If the risk is too high or the skill is infeasible, follow the issues (for example move closer and '
+        + 'observe, or choose another spot) and predict again. A receipt can be run once and expires.',
       parameters: {
         skill: { type: 'string', enum: ['navigate', 'pick', 'place', 'open', 'close'], required: true, description: 'Skill to predict.' },
         target: { type: 'string', description: 'pick: id of the object to grasp; open/close: id of the drawer.' },
         on: { type: 'string', description: 'place: id of the surface, open drawer or larger bowl to put the held object on or in.' },
         offset: { type: 'array', items: { type: 'number' }, description: 'place: [dx, dy] on the surface, metres.' },
+        at: { type: 'array', items: { type: 'number' }, description: 'place on the floor: [x, y] in metres.' },
         x: { type: 'number', description: 'navigate: goal x in metres.' },
         y: { type: 'number', description: 'navigate: goal y in metres.' },
-        yaw: { type: 'number', description: 'navigate: goal heading in radians.' },
+        yaw: { type: 'number', description: 'navigate: goal heading; place with at: final heading of the object (radians).' },
       },
       output: { schema: JSON_OUTPUT, render: (_a, v) => text(v) },
       async execute(args, exec) {
         const params: JsonObject = {}
-        for (const key of ['target', 'on', 'offset', 'x', 'y', 'yaw'] as const) {
+        for (const key of ['target', 'on', 'offset', 'at', 'x', 'y', 'yaw'] as const) {
           if (args[key] !== undefined) params[key] = args[key]
         }
         return json(receiptView(await ego.predict(args.skill, params, exec.signal)))

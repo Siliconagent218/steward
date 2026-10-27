@@ -50,6 +50,8 @@ class EsimConfig:
     drawer_pull_max: float = 0.33
     drawer_viewing_backoff: float = 0.25
     nest_fit: float = 0.92
+    floor_carry_lift: float = 0.05
+    floor_release_gap: float = 0.015
 
 
 class PredictionError(ValueError):
@@ -156,7 +158,8 @@ class Esim:
                       ((tx, sbox.hy), (0.0, 1.0), sbox.hy - ty), ((tx, -sbox.hy), (0.0, -1.0), sbox.hy + ty)]
         cfg = self.config
         obstacles_all = floor_obstacles(es, exclude)
-        grid = build_grid(obstacles_all, self.radius + cfg.nav_margin, [(rx, ry), target_xy])
+        carry = self._carry(es)
+        grid = build_grid(obstacles_all, self._sweep(carry) + cfg.nav_margin, [(rx, ry), target_xy])
         best, reasons = None, []
         if not (cfg.lift_min <= height <= cfg.lift_max):
             raise PredictionError(f"height {height:.2f} m is outside the lift range [{cfg.lift_min}, {cfg.lift_max}]")
@@ -171,11 +174,11 @@ class Esim:
             dock = (ex + nx * standoff, ey + ny * standoff)
             yaw = math.atan2(-ny, -nx)
             predock = (dock[0] + nx * cfg.predock_backoff, dock[1] + ny * cfg.predock_backoff)
-            blocked = self._footprint_blocked(obstacles_all, dock, yaw)
+            blocked = self._footprint_blocked(obstacles_all, dock, yaw, carry)
             if blocked:
                 reasons.append(f"side {normal}: dock pose collides with {blocked}")
                 continue
-            blocked = self._turn_blocked(obstacles_all, predock)
+            blocked = self._turn_blocked(obstacles_all, predock, self._sweep(carry))
             if blocked:
                 reasons.append(f"side {normal}: no room to turn at the pre-dock pose ({blocked})")
                 continue
@@ -192,19 +195,59 @@ class Esim:
             raise PredictionError("no feasible approach: " + "; ".join(reasons))
         return best
 
-    def _turn_blocked(self, obstacles: list[Box2D], xy: tuple[float, float]) -> str | None:
-        """The robot turns in place at the pre-dock pose, sweeping its circumscribed circle."""
+    def _turn_blocked(self, obstacles: list[Box2D], xy: tuple[float, float], radius: float | None = None) -> str | None:
+        """The robot turns in place at the pre-dock pose, sweeping its circumscribed circle (or the
+        larger circle swept by an object it carries low)."""
+        r = self.radius if radius is None else radius
         for box in obstacles:
-            if box.distance(xy[0], xy[1]) < self.radius + self.config.nav_margin:
+            if box.distance(xy[0], xy[1]) < r + self.config.nav_margin:
                 return box.id
         return None
 
-    def _footprint_blocked(self, obstacles: list[Box2D], xy: tuple[float, float], yaw: float) -> str | None:
+    def _footprint_blocked(self, obstacles: list[Box2D], xy: tuple[float, float], yaw: float,
+                           carry: tuple | None = None) -> str | None:
         me = Box2D("robot", xy[0], xy[1], yaw, self.half_x + 0.01, self.half_y + 0.01)
+        held = self._carried_box(carry, xy, yaw) if carry is not None else None
         for box in obstacles:
-            if rects_overlap(me, box):
+            if rects_overlap(me, box) or (held is not None and rects_overlap(held, box)):
                 return box.id
         return None
+
+    # ---------------------------------------------------------------- carrying
+    def _held_relative(self, es: SceneState) -> tuple | None:
+        """Held object's footprint in the robot frame: (x, y, yaw, half x, half y)."""
+        held = self._held(es)
+        if held is None:
+            return None
+        box, _, _ = entity_box(held)
+        rx, ry, ryaw = self._robot_xy_yaw(es)
+        dx, dy = box.cx - rx, box.cy - ry
+        c, s = math.cos(-ryaw), math.sin(-ryaw)
+        return (c * dx - s * dy, s * dx + c * dy, box.yaw - ryaw, box.hx, box.hy)
+
+    def _carry(self, es: SceneState) -> tuple | None:
+        """The held object's footprint when it is carried low enough to hit floor obstacles (a chair
+        lifted a few centimetres); objects carried above furniture height are ignored."""
+        held = self._held(es)
+        if held is None or entity_box(held)[1] >= self.config.floor_furniture_height:
+            return None
+        return self._held_relative(es)
+
+    @staticmethod
+    def _carried_box(carry: tuple, xy: tuple[float, float], yaw: float) -> Box2D:
+        lx, ly, dyaw, hx, hy = carry
+        c, s = math.cos(yaw), math.sin(yaw)
+        return Box2D("carried", xy[0] + c * lx - s * ly, xy[1] + s * lx + c * ly, yaw + dyaw, hx, hy)
+
+    def _sweep(self, carry: tuple | None) -> float:
+        """Radius of the circle the robot sweeps when turning in place, including a carried object."""
+        if carry is None:
+            return self.radius
+        lx, ly, dyaw, hx, hy = carry
+        c, s = math.cos(dyaw), math.sin(dyaw)
+        far = max(math.hypot(lx + c * sx * hx - s * sy * hy, ly + s * sx * hx + c * sy * hy)
+                  for sx in (-1, 1) for sy in (-1, 1))
+        return max(self.radius, far)
 
     # ----------------------------------------------------------------- skills
     def predict(self, es: SceneState, skill: str, params: dict) -> dict:
@@ -225,9 +268,11 @@ class Esim:
         rx, ry, ryaw = self._robot_xy_yaw(es)
         goal = (float(params["x"]), float(params["y"]))
         yaw = float(params.get("yaw", ryaw))
-        obstacles = floor_obstacles(es, set())
-        grid = build_grid(obstacles, self.radius + self.config.nav_margin, [(rx, ry), goal])
-        blocked = self._footprint_blocked(obstacles, goal, yaw)
+        held = self._held(es)
+        obstacles = floor_obstacles(es, {held.id} if held is not None else set())
+        carry = self._carry(es)
+        grid = build_grid(obstacles, self._sweep(carry) + self.config.nav_margin, [(rx, ry), goal])
+        blocked = self._footprint_blocked(obstacles, goal, yaw, carry)
         if blocked:
             raise PredictionError(f"goal pose collides with {blocked}")
         path = astar(grid, (rx, ry), goal)
@@ -235,7 +280,7 @@ class Esim:
             raise PredictionError("no collision-free path to the goal")
         clearance = path_clearance(path, obstacles) if len(path) > 1 else math.inf
         issues, risk = [], 0.02
-        if clearance < self.radius + 0.05:
+        if clearance < self._sweep(carry) + 0.05:
             issues.append(f"path passes within {clearance:.2f} m of an obstacle")
             risk = 0.2
         plan = {"path": [list(p) for p in path], "yaw": yaw, "pathLength": path_length(path)}
@@ -250,13 +295,16 @@ class Esim:
         if not self._affords(target, "graspable"):
             raise PredictionError(f"{target.id} ({target.category.value}) is not graspable")
         support = self._support_of(es, target)
-        if support is None:
+        _, target_bottom, _ = entity_box(target)
+        on_floor = support is None and target_bottom < 0.05
+        if support is None and not on_floor:
             raise PredictionError(f"no support surface is known under {target.id}; observe it first")
         tp = target.pose.value["p"]
         if self._contents(es, target):
             raise PredictionError(f"{target.id} holds {', '.join(e.id for e in self._contents(es, target))}; "
                                   "take those out first")
-        approach = self._approach(es, self._anchor(es, support), (tp[0], tp[1]), tp[2], {target.id})
+        anchor = target if on_floor else self._anchor(es, support)
+        approach = self._approach(es, anchor, (tp[0], tp[1]), tp[2], {target.id})
         sigma = math.hypot(self._sigma_xy(target), self._sigma_xy(self._self(es)))
         r = self.config.capture_radius
         p_miss = math.exp(-(r * r) / (2 * sigma * sigma)) if sigma > 0 else 0.0
@@ -268,20 +316,25 @@ class Esim:
         if existence_risk > 0.2:
             issues.append(f"target existence probability is only {target.existence:.2f}")
         risk = 1.0 - (1.0 - p_miss) * (1.0 - existence_risk)
-        plan = {**approach, "target": target.id, "support": support.id, "lift": tp[2],
-                "carryLift": min(self.config.lift_max, tp[2] + 0.10), "captureRadius": self.config.capture_radius}
+        carry_lift = tp[2] + (self.config.floor_carry_lift if on_floor else 0.10)
+        plan = {**approach, "target": target.id, "support": "floor" if on_floor else support.id, "lift": tp[2],
+                "carryLift": min(self.config.lift_max, carry_lift), "captureRadius": self.config.capture_radius}
         return self._receipt(es, "pick", params, risk, issues, plan)
 
     def _predict_place(self, es: SceneState, params: dict) -> dict:
         held = self._held(es)
         if held is None:
             raise PredictionError("the gripper is not holding anything")
-        support = es.find(params.get("on", ""))
-        if support is None:
+        support = es.find(params.get("on", "")) if "on" in params else None
+        if support is None and "on" in params:
             raise PredictionError(f"unknown support {params.get('on')!r}")
         held_box, hb, ht = entity_box(held)
         held_h = ht - hb
         held_half = max(held_box.hx, held_box.hy)
+        if support is None and "at" in params:
+            return self._predict_floor_place(es, held, params)
+        if support is None:
+            raise PredictionError(f"unknown support {params.get('on')!r}")
         if self._affords(support, "receptacle"):
             if self._affords(support, "pullable"):
                 spot, area, bottom, issues = self._drawer_spot(es, support, held, held_half)
@@ -313,6 +366,57 @@ class Esim:
                 "supportBox": {"cx": area.cx, "cy": area.cy, "yaw": area.yaw, "hx": area.hx, "hy": area.hy},
                 "heldHalf": held_half}
         return self._receipt(es, "place", params, risk, issues, plan)
+
+    def _predict_floor_place(self, es: SceneState, held: Entity, params: dict) -> dict:
+        """Put the held object down on the floor with its centre at ``at``: stand behind the spot
+        facing it, drive straight in from a pre-pose, lower the object to just above the floor and
+        release. ``yaw`` (radians) sets the object's final heading; otherwise the robot tries
+        several headings, starting with the direction it is coming from."""
+        cfg = self.config
+        try:
+            tx, ty = (float(v) for v in params["at"][:2])
+        except (TypeError, ValueError) as exc:
+            raise PredictionError(f"at must be [x, y] in metres: {exc}") from None
+        rel = self._held_relative(es)
+        lx, ly, dyaw, _, _ = rel
+        rx, ry, ryaw = self._robot_xy_yaw(es)
+        if "yaw" in params:
+            headings = [float(params["yaw"]) - dyaw]
+        else:
+            toward = math.atan2(ty - ry, tx - rx)
+            headings = [toward + k * math.pi / 4 for k in (0, 1, -1, 2, -2, 3, -3, 4)]
+        me = self._self(es)
+        lift_now = next((j.q.value[0] for j in me.rigid.joints if j.id == "lift" and j.q.value), None)
+        _, held_bottom, _ = entity_box(held)
+        if lift_now is None:
+            raise PredictionError("the lift position is unknown")
+        lift = lift_now - (held_bottom - cfg.floor_release_gap)
+        if not (cfg.lift_min <= lift <= cfg.lift_max):
+            raise PredictionError(f"lowering {held.id} to the floor needs lift {lift:.2f} m, outside the lift range")
+        obstacles = floor_obstacles(es, {held.id})
+        sweep = self._sweep(rel)
+        grid = build_grid(obstacles, sweep + cfg.nav_margin, [(rx, ry), (tx, ty)])
+        reasons = []
+        for h in headings:
+            c, s = math.cos(h), math.sin(h)
+            dock = (tx - (c * lx - s * ly), ty - (s * lx + c * ly))
+            predock = (dock[0] - c * cfg.predock_backoff, dock[1] - s * cfg.predock_backoff)
+            blocked = self._footprint_blocked(obstacles, dock, h, rel)
+            if blocked:
+                reasons.append(f"heading {math.degrees(h):.0f} deg: {held.id} or the robot would hit {blocked}")
+                continue
+            blocked = self._turn_blocked(obstacles, predock, sweep)
+            if blocked:
+                reasons.append(f"heading {math.degrees(h):.0f} deg: no room to turn with {held.id} ({blocked})")
+                continue
+            path = astar(grid, (rx, ry), predock)
+            if path is None:
+                reasons.append(f"heading {math.degrees(h):.0f} deg: no collision-free path while carrying {held.id}")
+                continue
+            plan = {"path": [list(q) for q in path], "predock": list(predock), "dock": list(dock), "yaw": h,
+                    "lift": lift, "object": held.id, "floor": [tx, ty], "pathLength": path_length(path)}
+            return self._receipt(es, "place", params, 0.03, [], plan)
+        raise PredictionError(f"cannot put {held.id} down at ({tx:.2f}, {ty:.2f}): " + "; ".join(reasons[:4]))
 
     def _nest_spot(self, es: SceneState, bowl: Entity, held: Entity, held_half: float):
         """Nest a stackable object in the centre of a larger receptacle that holds nothing yet."""

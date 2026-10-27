@@ -315,6 +315,7 @@ KITCHEN_ASSETS = {
     "black-mug": ("mug", {"color": "black"}),
     "teddy-bear": ("teddy_bear", {}),
     "scissors": ("scissors", {}),
+    "chair": ("chair", {}),
 }
 
 
