@@ -126,3 +126,38 @@ def test_phase1_exploration_builds_an_accurate_ego_state_from_rgbd(kitchen_root,
         api.stop()
         runtime.stop()
         host.stop()
+
+
+def _frame(depth: np.ndarray, mask: np.ndarray) -> dict:
+    return {"depth": depth, "mask": mask, "rgb": np.full((*depth.shape, 3), 180, np.uint8), "fovy": 58.0}
+
+
+CAM = {"p": [0.0, 0.0, 3.0], "q": [1.0, 0.0, 0.0, 0.0]}
+
+
+def test_a_region_whose_base_is_cut_by_the_image_or_hidden_by_something_nearer_has_no_seen_bottom():
+    from steward.ego.perception import segments
+
+    h, w = 60, 80
+    depth = np.full((h, w), 4.0, np.float32)
+    mask = np.zeros((h, w), np.uint8)
+    mask[10:30, 5:25] = 1  # standing free: the floor right below is about as far
+    depth[10:30, 5:25] = 3.0
+    depth[30:, 5:25] = 2.95
+    mask[5:25, 40:70] = 2  # a wall with a counter right below it, much nearer
+    depth[5:25, 40:70] = 3.4
+    mask[25:45, 40:70] = 3  # the counter: background below it is farther
+    depth[25:45, 40:70] = 2.0
+    mask[45:60, 30:38] = 4  # reaches the lower image edge
+    depth[45:60, 30:38] = 2.5
+    seen = {round(seg.range, 1): seg.bottom_seen for seg in segments(_frame(depth, mask), CAM)}
+    assert seen == {3.0: True, 3.4: False, 2.0: True, 2.5: False}
+
+
+def test_a_partial_view_without_its_base_is_classified_by_its_visible_top():
+    tabletop = classify([1.2, 0.8, 0.30], 0.45, [0.8, 0.7, 0.5], bottom_seen=False)
+    assert max(tabletop, key=tabletop.get) == "table"
+    hidden_wall = classify([3.5, 0.04, 1.03], 0.47, [0.9, 0.9, 0.9], bottom_seen=False)
+    assert max(hidden_wall, key=hidden_wall.get) == "wall"
+    floating = classify([1.2, 0.8, 0.30], 0.45, [0.8, 0.7, 0.5])
+    assert floating.get("table", 0.0) < 0.2, "a base in view that is off the floor is not a table"

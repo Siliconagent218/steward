@@ -53,15 +53,21 @@ def _color_score(rule: str | None, color: np.ndarray, invalid_frac: float) -> fl
 
 
 def classify(size: np.ndarray, bottom: float, color: np.ndarray, invalid_frac: float = 0.0,
-             temperature: float = 1.0) -> dict[str, float]:
+             temperature: float = 1.0, bottom_seen: bool = True) -> dict[str, float]:
     """Probability per category for a measured box (full extents, long side first) whose lowest
-    point is ``bottom`` metres above the floor; :data:`UNKNOWN` takes the mass when no prototype fits."""
-    obs = np.array([max(size[0], size[1]), min(size[0], size[1]), size[2]], float)
-    obs = np.maximum(obs, 0.004)
+    point is ``bottom`` metres above the floor; :data:`UNKNOWN` takes the mass when no prototype fits.
+
+    With ``bottom_seen`` false the lowest point is an image edge or an occluder, not the base: it is
+    no evidence of standing on the floor or not, and a floor-standing prototype is compared with
+    the visible top instead of the visible height (a table seen from close shows only its top)."""
+    seen = np.array([max(size[0], size[1]), min(size[0], size[1]), size[2]], float)
+    seen = np.maximum(seen, 0.004)
     scores = {}
     on_floor = bottom < 0.06
+    top = bottom + seen[2]
     for name, shape in SHAPES.items():
         proto = np.array(shape["dims"], float)
+        obs = seen if bottom_seen or not shape["floor"] else np.array([seen[0], seen[1], max(seen[2], top)])
         lo, hi = shape.get("scale", (1.0, 1.0))
         # One scale for the whole object, set by the axis that fills the prototype most: a partial
         # view only shrinks the other axes, which costs little, while a flat wide region cannot pass
@@ -71,9 +77,9 @@ def classify(size: np.ndarray, bottom: float, color: np.ndarray, invalid_frac: f
         for k in range(3):
             r = math.log(obs[k] / (proto[k] * scale))
             cost += (r / UNDER[k]) ** 2 if r < 0 else (r / OVER) ** 2
-        if shape["floor"] != on_floor:
+        if bottom_seen and shape["floor"] != on_floor:
             cost += 6.0
-        if bottom < shape.get("min_bottom", -1.0):
+        if bottom_seen and bottom < shape.get("min_bottom", -1.0):
             cost += 6.0
         if bottom + obs[2] < shape.get("min_top", -1.0):
             cost += 6.0

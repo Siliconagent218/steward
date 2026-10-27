@@ -27,6 +27,8 @@ class PerceptionConfig:
     min_points: int = 20
     max_points: int = 400
     floor_cut: float = 0.012
+    occluder_gap: float = 0.15  # something this much nearer right below a region hides its base
+    occluded_share: float = 0.3  # share of the lower edge hidden that leaves the base unseen
 
 
 @dataclass
@@ -39,6 +41,7 @@ class Segment:
     invalid_frac: float  # share of masked pixels without a depth reading (glass, far)
     border: bool  # the region touches the image border (truncated view)
     range: float  # median distance from the camera
+    bottom_seen: bool = True  # the lowest points are the object's base, not an image edge or an occluder
 
 
 def decode_rgbd(blob: bytes) -> dict:
@@ -84,8 +87,33 @@ def segments(frame: dict, cam_pose: dict, config: PerceptionConfig | None = None
             invalid_frac=float(1.0 - valid.mean()),
             border=bool(xs.min() == 0 or ys.min() == 0 or xs.max() == w - 1 or ys.max() == h - 1),
             range=float(np.median(dv)),
+            bottom_seen=_bottom_seen(mask, depth, instance, ys, xs, cfg),
         ))
     return out
+
+
+def _bottom_seen(mask: np.ndarray, depth: np.ndarray, instance: int, ys: np.ndarray, xs: np.ndarray,
+                 cfg: PerceptionConfig) -> bool:
+    """Whether a region's lowest pixels show the object's base: not when the region reaches the
+    lower image edge (the base is out of view), nor when much of its lower edge has something
+    clearly nearer right below it (the base is hidden, for example a wall behind a counter). A
+    base on the floor has floor right below it, at nearly the same distance."""
+    h = mask.shape[0]
+    if ys.max() >= h - 1:
+        return False
+    sel = np.zeros(mask.shape, dtype=bool)
+    sel[ys, xs] = True
+    edge_y, edge_x = np.nonzero(sel[:-2] & ~sel[1:-1])
+    if len(edge_y) == 0:
+        return True
+    here = depth[edge_y, edge_x]
+    below = depth[edge_y + 2, edge_x]
+    other = mask[edge_y + 2, edge_x] != instance
+    measured = (here > 0.05) & other
+    if not measured.any():
+        return True
+    hidden = measured & (below > 0.05) & (below < here - cfg.occluder_gap)
+    return float(hidden.sum()) / float(measured.sum()) < cfg.occluded_share
 
 
 def _hull(xy: np.ndarray) -> np.ndarray:

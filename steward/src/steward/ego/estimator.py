@@ -20,8 +20,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from steward.ego.classify import prototype
-from steward.ego.classify import classify
+from steward.ego.classify import SHAPES, classify, prototype
 from steward.ego.perception import box_at_yaw, box_of, segments
 from steward.ego.planner import Box2D, front_box, protrusion, room_centre
 from steward.ego.priors import compatible, prior
@@ -52,6 +51,7 @@ class Track:
     settled: bool = True  # False right after the robot put it down, until it is seen again
     mean_rgb: np.ndarray | None = None  # running mean colour of its regions (RGB-D mode)
     mean_invalid: float = 0.0  # running mean share of its pixels without depth
+    bottom_seen: bool = False  # some view showed its base (not cut by the image edge or hidden)
 
     @property
     def category(self) -> str:
@@ -190,7 +190,7 @@ class EgoEstimator:
         measurements = []
         for seg in segments(frame, cam, rng=self._rng):
             centre, size, yaw = box_of(seg.points)
-            probs = classify(size, centre[2] - size[2] / 2, seg.color, seg.invalid_frac)
+            probs = classify(size, centre[2] - size[2] / 2, seg.color, seg.invalid_frac, bottom_seen=seg.bottom_seen)
             measurements.append({"seg": seg, "centre": centre, "size": size, "yaw": yaw, "probs": probs,
                                  "footprint": float(max(size[0], size[1]))})
         pairs = []
@@ -338,7 +338,10 @@ class EgoEstimator:
         object, for example a cabinet and the drawer at its top. Category disagreement alone is
         only a cost: partial views of glass are often misclassified."""
         m_bottom = m["centre"][2] - m["size"][2] / 2
-        return (track.bottom() < 0.05 and m_bottom > 0.3) or (track.bottom() > 0.3 and m_bottom < 0.05)
+        # A lowest point at an image edge or an occluder says nothing about being raised.
+        raised_region = m["seg"].bottom_seen and m_bottom > 0.3
+        raised_track = track.bottom_seen and track.bottom() > 0.3
+        return (track.bottom() < 0.05 and raised_region) or (raised_track and m_bottom < 0.05)
 
     def _merge_parts(self, cam_p: np.ndarray) -> None:
         """Fold a track into a larger one (furniture, walls) when it lies inside the larger box at
@@ -384,6 +387,7 @@ class EgoEstimator:
         n = track.observations
         track.mean_rgb = rgb if track.mean_rgb is None else track.mean_rgb + (rgb - track.mean_rgb) / n
         track.mean_invalid += (seg.invalid_frac - track.mean_invalid) / n
+        track.bottom_seen = track.bottom_seen or seg.bottom_seen
         if track.held:
             return
         track.settled = True
@@ -449,7 +453,8 @@ class EgoEstimator:
         if track.mean_rgb is not None:
             # The accumulated box is the best evidence of what the object is: classify it again,
             # with confidence growing with the number of views behind it.
-            probs = classify(size, centre[2] - size[2] / 2, track.mean_rgb, track.mean_invalid)
+            probs = classify(size, centre[2] - size[2] / 2, track.mean_rgb, track.mean_invalid,
+                             bottom_seen=track.bottom_seen)
             weight = float(min(track.observations, 20))
             track.category_counts = {k: v * weight for k, v in probs.items()}
         proto = prototype(track.category) if track.category_counts else None
@@ -482,6 +487,11 @@ class EgoEstimator:
                 size[2] = height
                 completion = max(completion, grow)
         centre = centre + shift
+        if not track.bottom_seen and SHAPES.get(track.category, {}).get("floor"):
+            # Furniture whose base no view has shown (a table seen from close, a wall behind a
+            # counter) stands on the floor below its visible part.
+            top = centre[2] + size[2] / 2
+            size[2], centre[2] = top, top / 2
         bottom = centre[2] - size[2] / 2
         if size[0] < 0.3 and bottom > 0.15:
             # Something small off the floor rests on something: extend the box down to the nearest
