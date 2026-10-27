@@ -187,3 +187,21 @@ def test_a_small_object_keeps_its_single_view_size_when_views_of_it_disagree():
     est._rebuild_geometry(mug, np.array([0.0, 0.0, 1.2]), 1.0)
     assert mug.size[0] == pytest.approx(0.1, abs=0.01), "a view 12 cm off (an object pushed aside) does not swell it"
     assert mug.pos[0] == pytest.approx(1.0, abs=0.02)
+
+
+def test_an_established_piece_of_furniture_is_not_folded_into_a_larger_track_of_another_kind():
+    from steward.assets.generators import steward_bot
+    from steward.ego.estimator import EgoEstimator, Track
+
+    est = EgoEstimator(robot_model=steward_bot().to_dict())
+
+    def track(oid, counts, pos, size, observations):
+        return Track(id=oid, category_counts=counts, pos=np.array(pos), var=np.full(3, 1e-4), yaw=0.0, yaw_var=1e-3,
+                     size=np.array(size), observations=observations, first_seen=0.0, last_seen=0.0, existence=1.0)
+
+    est.tracks["e:11"] = track("e:11", {"counter": 4.0, "unknown": 1.0}, [0.0, 0.6, 0.74], [2.6, 0.6, 1.48], 12)
+    est.tracks["e:16"] = track("e:16", {"sideboard": 4.0, "counter": 3.0}, [0.0, 0.6, 0.43], [1.4, 0.47, 0.84], 20)
+    est.tracks["e:20"] = track("e:20", {"unknown": 1.0}, [0.5, 0.6, 0.3], [0.35, 0.3, 0.6], 2)
+    est._merge_parts(np.array([0.0, -2.0, 1.2]))
+    assert "e:16" in est.tracks, "the sideboard stays its own object"
+    assert "e:20" not in est.tracks, "a fragment seen twice is still folded in"

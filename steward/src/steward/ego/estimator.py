@@ -359,6 +359,9 @@ class EgoEstimator:
                     continue
                 if small.footprint < 0.3 and small.bottom() > 0.05:
                     continue  # tableware on furniture is not part of it
+                if small.footprint >= 0.3 and small.observations >= ESTABLISHED_VIEWS and small.category != big.category:
+                    continue  # an established piece of furniture is not a part of something else (a sideboard
+                    # in front of a wall piece misread as furniture)
                 if small.voxels is not None:
                     big.voxels = self._union(big.voxels, small.voxels)
                 for cat, n in small.category_counts.items():
@@ -808,6 +811,7 @@ def color_name(rgb: np.ndarray, invalid_frac: float = 0.0) -> str:
 
 
 VOXEL = 0.01
+ESTABLISHED_VIEWS = 5
 SMALL_M = 0.3
 RECENT_VIEWS = 12
 
