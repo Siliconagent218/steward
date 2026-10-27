@@ -25,6 +25,10 @@ CATEGORY_PRIORS: dict[str, dict] = {
     "mug": {"role": "object", "root": {"free": 1.0}, "affordances": ["graspable", "container"], "fragility": 0.4},
     "teddy_bear": {"role": "object", "root": {"free": 1.0}, "affordances": ["graspable"], "fragility": 0.0},
     "scissors": {"role": "object", "root": {"free": 1.0}, "affordances": ["graspable"], "fragility": 0.0},
+    "toy_airplane": {"role": "object", "root": {"free": 1.0}, "affordances": ["graspable"], "fragility": 0.1},
+    "pistol": {"role": "object", "root": {"free": 1.0}, "affordances": ["graspable"], "fragility": 0.0},
+    "pill_bottle": {"role": "object", "root": {"free": 1.0}, "affordances": ["graspable", "container"], "fragility": 0.2},
+    "perfume_bottle": {"role": "object", "root": {"free": 1.0}, "affordances": ["graspable", "container"], "fragility": 0.8},
     "chair": {"role": "object", "root": {"free": 0.95, "fixed": 0.05}, "affordances": ["graspable", "floor-standing"],
               "fragility": 0.1},
 }

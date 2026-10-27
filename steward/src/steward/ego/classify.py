@@ -29,6 +29,10 @@ SHAPES: dict[str, dict] = {
     "mug": {"dims": (0.11, 0.085, 0.095), "floor": False, "color": "dark"},
     "teddy_bear": {"dims": (0.11, 0.105, 0.18), "floor": False, "color": "brown"},
     "scissors": {"dims": (0.16, 0.07, 0.012), "floor": False},
+    "toy_airplane": {"dims": (0.22, 0.20, 0.06), "floor": False, "color": "yellow"},
+    "pistol": {"dims": (0.18, 0.12, 0.03), "floor": False, "color": "dark"},
+    "pill_bottle": {"dims": (0.046, 0.046, 0.085), "floor": False},
+    "perfume_bottle": {"dims": (0.065, 0.04, 0.10), "floor": False, "color": "pink"},
 }
 
 UNDER = (0.55, 1.2, 0.55)  # tolerance (log ratio) per axis for measuring less than the prototype; the
@@ -49,6 +53,10 @@ def _color_score(rule: str | None, color: np.ndarray, invalid_frac: float) -> fl
         return 0.0 if value < 0.3 else -3.0
     if rule == "brown":
         return 0.0 if (r > g > b and 0.25 < value < 0.8 and saturation > 0.3) else -4.0
+    if rule == "yellow":
+        return 0.0 if (r > 0.45 and g > 0.35 and r >= g > b and saturation > 0.45) else -3.0
+    if rule == "pink":
+        return 0.0 if (r > 0.45 and r > b > g and saturation > 0.2) else -2.0
     return 0.0
 
 

@@ -37,12 +37,14 @@ def _drive(sim: WorldSim, x: float, y: float, yaw: float, seconds: float) -> Non
     sim.step_seconds(seconds)
 
 
-def test_scene_starts_with_toys_in_the_sideboard_drawer_and_tableware_on_the_table(chores_scene):
+def test_scene_starts_with_items_in_both_drawers_and_tableware_on_the_table(chores_scene):
     sim = WorldSim(chores_scene)
     sim.step_seconds(1.0)
     support = {r["a"]["entity"]: r["b"] for r in sim.world_state()["relations"] if r["type"] == "supported-by"}
     assert support["w:teddy-bear"] == {"entity": "w:sideboard-1", "link": "drawer"}
-    assert support["w:scissors"] == {"entity": "w:sideboard-1", "link": "drawer"}
+    assert support["w:pistol"] == {"entity": "w:sideboard-1", "link": "drawer"}
+    for item in ("w:toy-airplane", "w:pill-bottle", "w:perfume-bottle"):
+        assert support[item] == {"entity": "w:cabinet-1", "link": "drawer"}
     for eid in ("w:bowl-red", "w:bowl-green", "w:bowl-blue", "w:wine-glass", "w:mug"):
         assert support[eid]["entity"] == "w:table-1"
     parts = {cat for ent in sim.template.entities for _, _, cat in sim.perception_parts(ent)}
@@ -292,9 +294,9 @@ def test_one_chores_round_is_confirmed_by_world_state(kitchen_root, tmp_path):
         def truth():
             return host.sim.world_state(), {g["id"]: g for g in console_state(host)["groundTruth"]}
 
-        before = drawer_contents(truth()[0])
         runner = Chores(api.url)
         _explore(api.url, 120)
+        before = drawer_contents(truth()[0])  # contents are known once the simulation has stepped
         runner.arrange_on_table()
         ok, detail = check_table(*truth())
         assert ok, detail

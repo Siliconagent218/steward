@@ -160,6 +160,12 @@ def _view(api: str, furniture: dict, timeout_s: float) -> None:
     time.sleep(1.5)
 
 
+def _contents(summary: dict, holder: dict) -> list[str]:
+    """Ids of the objects resting on ``holder`` that are likely to exist (a fading fragment is not
+    something to carry)."""
+    return [o["id"] for o in summary["objects"] if o["on"] == holder["id"] and o["existence"] >= 0.5]
+
+
 def _drawer_of(summary: dict, furniture: dict) -> dict | None:
     drawers = _objects(summary, "drawer")
     near = [d for d in drawers if math.dist(d["position"][:2], furniture["position"][:2]) < 0.6]
@@ -403,21 +409,29 @@ class Chores:
         self._step("drawers", "关上抽屉", object=drawer["id"])
 
     def swap_drawers(self) -> None:
+        """Exchange the contents of the sideboard and cabinet drawers. Only the pulled-out part of a
+        drawer can take an object, so one drawer never holds both sets: the sideboard drawer's items
+        wait on the sideboard top while the cabinet's move across."""
         board, cabinet = self._confirmed("sideboard"), self._confirmed("cabinet")
         a = self._open(board)
-        a_items = [o["id"] for o in _summary(self.api)["objects"] if o["on"] == a["id"]]
+        a_items = _contents(_summary(self.api), a)
         b = self._open(cabinet)
-        b_items = [o["id"] for o in _summary(self.api)["objects"] if o["on"] == b["id"]]
-        for items, src, dst in ((a_items, a, b), (b_items, b, a)):
-            for oid in items:
-                obj = _refresh(self.api, {"id": oid, "category": "item"})
-                dst = _refresh(self.api, dst)
-                self._doing(f"把{describe(obj)} 从抽屉 {src['id']} 移到抽屉 {dst['id']}")
-                self._clearing("drawers", lambda o=obj, d=dst: _move(self.api, o, {"on": d["id"]}, d, self.log,
-                                                                       self.timeout_s))
-                self._step("drawers", f"{describe(obj)}：抽屉对调", object=oid, to=dst["id"])
+        b_items = _contents(_summary(self.api), b)
+        for oid in a_items:
+            self._transfer(oid, board, f"暂放到{describe(board)} 台面上")
+        for oid in b_items:
+            self._transfer(oid, a, f"从柜子的抽屉移到餐边柜的抽屉 {a['id']}")
+        for oid in a_items:
+            self._transfer(oid, b, f"从台面移到柜子的抽屉 {b['id']}")
         self._clearing("drawers", lambda: self._close(b))
         self._clearing("drawers", lambda: self._close(a))
+
+    def _transfer(self, oid: str, dst: dict, how: str) -> None:
+        obj = _refresh(self.api, {"id": oid, "category": "item"})
+        dst = _refresh(self.api, dst)
+        self._doing(f"把{describe(obj)} {how}")
+        self._clearing("drawers", lambda o=obj, d=dst: _move(self.api, o, {"on": d["id"]}, d, self.log, self.timeout_s))
+        self._step("drawers", f"{describe(obj)}：{how}", object=oid, to=dst["id"])
 
     # ---------------------------------------------------------------- recovery
     def recover(self, message: str = "") -> None:

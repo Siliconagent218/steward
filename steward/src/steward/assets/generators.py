@@ -28,6 +28,12 @@ BLACK = [0.06, 0.06, 0.07, 1.0]
 TEDDY = [0.58, 0.38, 0.20, 1.0]
 TEDDY_DARK = [0.30, 0.18, 0.10, 1.0]
 SCISSOR_HANDLE = [0.80, 0.12, 0.12, 1.0]
+TOY_YELLOW = [0.95, 0.78, 0.10, 1.0]
+TOY_RED = [0.85, 0.15, 0.15, 1.0]
+PILL_WHITE = [0.94, 0.94, 0.92, 1.0]
+PILL_CAP = [0.95, 0.45, 0.10, 1.0]
+PERFUME_GLASS = [0.95, 0.60, 0.75, 0.8]
+GOLD = [0.85, 0.70, 0.30, 1.0]
 COLORS = {"red": [0.85, 0.15, 0.15, 1.0], "green": [0.15, 0.70, 0.25, 1.0], "blue": [0.15, 0.35, 0.90, 1.0]}
 ROBOT_BODY = [0.20, 0.32, 0.55, 1.0]
 ROBOT_ARM = [0.85, 0.55, 0.15, 1.0]
@@ -279,6 +285,57 @@ def scissors(length: float = 0.17, mass: float = 0.08) -> Entity:
     return _entity("scissors", "object", "free", [half("blade_a", t / 2, 1.0), half("blade_b", t * 1.5 + 0.0005, -1.0)], [pivot])
 
 
+def toy_airplane(length: float = 0.22, span: float = 0.20, mass: float = 0.12) -> Entity:
+    """Toy airplane resting on its belly: fuselage along +x, wings across, tail fin at the back."""
+    body_h = 0.045
+    geoms = [
+        primitive("box", [length, 0.04, body_h], pose([0, 0, body_h / 2]), TOY_YELLOW),
+        primitive("box", [0.07, span, 0.008], pose([0.01, 0, body_h * 0.6]), TOY_RED),
+        primitive("box", [0.04, span * 0.4, 0.006], pose([-length / 2 + 0.025, 0, body_h * 0.8]), TOY_RED),
+        primitive("box", [0.035, 0.006, 0.035], pose([-length / 2 + 0.02, 0, body_h + 0.0175]), TOY_RED),
+    ]
+    link = Link(id="body", name="toy airplane", geometry={"collision": geoms}, inertial=exact({"mass": mass}),
+                material=exact({"friction": 0.8, "fragility": 0.1}), affordances=[exact("graspable")])
+    return _entity("toy_airplane", "object", "free", [link])
+
+
+def pistol(length: float = 0.18, grip: float = 0.12, thickness: float = 0.028, mass: float = 0.6) -> Entity:
+    """Pistol lying flat on its side: slide along +x, grip towards -y at the rear, trigger guard."""
+    t = thickness
+    geoms = [
+        primitive("box", [length, 0.03, t], pose([0, 0, t / 2]), BLACK),
+        primitive("box", [0.035, grip - 0.03, t], pose([-length / 2 + 0.03, -(grip - 0.03) / 2 - 0.015, t / 2]), BLACK),
+        primitive("box", [0.03, 0.006, t * 0.6], pose([-length / 2 + 0.07, -0.035, t / 2]), BLACK),
+    ]
+    link = Link(id="body", name="pistol", geometry={"collision": geoms}, inertial=exact({"mass": mass}),
+                material=exact({"friction": 0.8, "fragility": 0.0}), affordances=[exact("graspable")])
+    return _entity("pistol", "object", "free", [link])
+
+
+def pill_bottle(radius: float = 0.022, height: float = 0.07, mass: float = 0.06) -> Entity:
+    """Small white pill bottle with an orange cap."""
+    cap = 0.015
+    geoms = [
+        primitive("cylinder", [radius, height], pose([0, 0, height / 2]), PILL_WHITE),
+        primitive("cylinder", [radius + 0.002, cap], pose([0, 0, height + cap / 2]), PILL_CAP),
+    ]
+    link = Link(id="body", name="pill bottle", geometry={"collision": geoms}, inertial=exact({"mass": mass}),
+                material=exact({"friction": 0.8, "fragility": 0.2}), affordances=[exact("graspable"), exact("container")])
+    return _entity("pill_bottle", "object", "free", [link])
+
+
+def perfume_bottle(width: float = 0.065, depth: float = 0.04, height: float = 0.08, mass: float = 0.2) -> Entity:
+    """Flat pink glass perfume bottle with a gold cap."""
+    cap = 0.02
+    geoms = [
+        primitive("box", [width, depth, height], pose([0, 0, height / 2]), PERFUME_GLASS),
+        primitive("cylinder", [0.012, cap], pose([0, 0, height + cap / 2]), GOLD),
+    ]
+    link = Link(id="body", name="perfume bottle", geometry={"collision": geoms}, inertial=exact({"mass": mass}),
+                material=exact({"friction": 0.7, "fragility": 0.8}), affordances=[exact("graspable"), exact("container")])
+    return _entity("perfume_bottle", "object", "free", [link])
+
+
 def chair(seat: float = 0.46, seat_height: float = 0.46, back_height: float = 0.9, mass: float = 5.0) -> Entity:
     """Dining chair standing on four legs; the backrest is on the -x side, so the chair faces +x."""
     leg, t = 0.04, 0.04
@@ -372,6 +429,10 @@ GENERATORS: dict[str, Callable[..., Entity]] = {
     "mug": mug,
     "teddy_bear": teddy_bear,
     "scissors": scissors,
+    "toy_airplane": toy_airplane,
+    "pistol": pistol,
+    "pill_bottle": pill_bottle,
+    "perfume_bottle": perfume_bottle,
     "chair": chair,
     "steward_bot": steward_bot,
 }

@@ -103,7 +103,10 @@ def test_phase1_exploration_builds_an_accurate_ego_state_from_rgbd(kitchen_root,
         _pump_until(host, finished.is_set)
         record = host.observer.latest["w:robot-1"]
         assert record["phase"] == "phase1"
-        assert record["recall"] >= 0.75, record
+        relations = host.sim.world_state()["relations"]
+        in_drawers = sum(1 for r in relations if r["type"] == "supported-by" and r["b"].get("link") == "drawer")
+        assert record["matchedObjects"] >= record["gtObjects"] - in_drawers - 1, \
+            f"everything outside the closed drawers is found ({in_drawers} lie in them): {record}"
         assert record["meanPositionErrorM"] < 0.03, record
         assert record["meanSizeErrorM"] < 0.04, record
         assert record["falsePositives"] <= 1, record

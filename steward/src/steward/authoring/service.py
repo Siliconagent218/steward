@@ -274,7 +274,8 @@ CHORES_TASK = ("餐桌上的三个颜色、大小不同的碗、一个透明高�
 
 def chores_spec() -> dict:
     """Kitchen for the chores task: five tableware items scattered on the far half of the table, a
-    teddy bear and scissors in the sideboard drawer, and an empty drawer in the cabinet."""
+    teddy bear and a pistol in the sideboard drawer, and a toy airplane, a pill bottle and a perfume
+    bottle in the cabinet drawer."""
     return {
         "name": "phase0-chores",
         "entities": [
@@ -289,7 +290,10 @@ def chores_spec() -> dict:
             {"id": "w:mug", "asset": "black-mug", "on": "w:table-1", "offset": [0.33, -0.24], "yaw": 0.8},
             {"id": "w:bowl-blue", "asset": "bowl-blue-small", "on": "w:table-1", "offset": [0.48, -0.12]},
             {"id": "w:teddy-bear", "asset": "teddy-bear", "in": "w:sideboard-1", "offset": [-0.02, -0.12]},
-            {"id": "w:scissors", "asset": "scissors", "in": "w:sideboard-1", "offset": [0.0, 0.12], "yaw": 0.3},
+            {"id": "w:pistol", "asset": "pistol", "in": "w:sideboard-1", "offset": [0.0, 0.13]},
+            {"id": "w:toy-airplane", "asset": "toy-airplane", "in": "w:cabinet-1", "offset": [0.05, -0.12]},
+            {"id": "w:pill-bottle", "asset": "pill-bottle", "in": "w:cabinet-1", "offset": [-0.1, 0.14]},
+            {"id": "w:perfume-bottle", "asset": "perfume-bottle", "in": "w:cabinet-1", "offset": [0.1, 0.14]},
             {"id": "w:robot-1", "asset": "steward-bot", "at": {"x": -1.6, "y": -1.3, "yaw": 0.0}},
         ],
         "regions": [{"id": "kitchen", "label": "kitchen", "polygon": [[-3, -2.5], [3, -2.5], [3, 2.5], [-3, 2.5]]}],
@@ -317,6 +321,10 @@ KITCHEN_ASSETS = {
     "black-mug": ("mug", {"color": "black"}),
     "teddy-bear": ("teddy_bear", {}),
     "scissors": ("scissors", {}),
+    "toy-airplane": ("toy_airplane", {}),
+    "pistol": ("pistol", {}),
+    "pill-bottle": ("pill_bottle", {}),
+    "perfume-bottle": ("perfume_bottle", {}),
     "chair": ("chair", {}),
 }
 

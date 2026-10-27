@@ -15,6 +15,7 @@ import math
 from dataclasses import dataclass
 
 DRAWER_FURNITURE = ("sideboard", "cabinet")
+TABLEWARE = ("bowl", "cup", "mug", "plate", "wine_glass")
 UNKNOWN = "unknown"
 
 
@@ -34,6 +35,9 @@ class RoleConfig:
     """Objects less likely to exist than this take no part in the assignment."""
     nested_evidence: float = 3.0
     """Factor on ``bowl`` for a flat object resting on a bowl: a nested bowl seen only by its rim."""
+    stored_in_drawer: float = 0.2
+    """Factor on the tableware categories of an object resting in a drawer: in this home tableware
+    is not kept in drawers, so a flat toy there is not a bowl a task would carry to the table."""
     stickiness: float = 1.5
     """Factor on the role an object had in the previous assignment, so that roles do not swap
     between two similar objects from one view to the next (a robot sent back and forth)."""
@@ -44,7 +48,8 @@ def assign_roles(objects: list[dict], config: RoleConfig, previous: dict[str, st
 
     Within each group, (object, category) pairs are taken from the most to the least probable; a
     pair is accepted when the object has no role yet and the category is not a singleton already
-    taken. An object outside every group keeps its perceived category; one whose possible group
+    taken. An object outside every group takes its likeliest category once the evidence is applied
+    (drawers in furniture, nested bowls, tableware not stored in drawers); one whose possible group
     categories are all one-of-a-kind and taken gets its likeliest category outside the group, or
     ``unknown``, so that a task never picks it as the one sideboard or table of the home.
 
@@ -73,7 +78,19 @@ def assign_roles(objects: list[dict], config: RoleConfig, previous: dict[str, st
                     p[c] *= config.drawer_evidence
             total = sum(p.values()) or 1.0
             probs[o["id"]] = {k: v / total for k, v in p.items()}
-    roles = {o["id"]: (o["category"], float(o["categories"].get(o["category"], 1.0))) for o in objects}
+    drawer_ids = {o["id"] for o in objects if o["category"] == "drawer"}
+    for o in objects:
+        p = probs[o["id"]]
+        if o.get("on") in drawer_ids and any(c in p for c in TABLEWARE):
+            for c in TABLEWARE:
+                if c in p:
+                    p[c] *= config.stored_in_drawer
+            total = sum(p.values()) or 1.0
+            probs[o["id"]] = {k: v / total for k, v in p.items()}
+    roles = {}
+    for o in objects:
+        best = max(probs[o["id"]], key=probs[o["id"]].get) if probs[o["id"]] else o["category"]
+        roles[o["id"]] = (best, float(probs[o["id"]].get(best, 1.0)))
     for group in config.confusable:
         members = [o["id"] for o in objects if o["existence"] >= config.min_existence
                    and max(probs[o["id"]], key=probs[o["id"]].get) in group]
