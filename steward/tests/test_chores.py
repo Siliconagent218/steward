@@ -333,3 +333,14 @@ def test_a_doubtful_or_missing_role_is_looked_at_from_closer_before_acting(monke
     looked.clear()
     assert runner._confirmed("sideboard")["id"] == "e:21" and looked == ["e:21"], "the likeliest candidate is looked at"
     assert runner.attempt.startswith("寻找餐边柜")
+
+
+def test_tableware_lying_on_the_floor_is_left_out_of_the_arrangement():
+    from steward.chores import tableware
+
+    def item(oid, role, z, extent):
+        return {"id": oid, "category": role, "role": role, "existence": 1.0, "position": [0.0, 0.0, z], "extentM": extent}
+
+    summary = {"objects": [item("e:1", "bowl", 0.79, [0.2, 0.2, 0.06]), item("e:2", "mug", 0.8, [0.1, 0.08, 0.1]),
+                           item("e:3", "bowl", 0.02, [0.24, 0.24, 0.02])]}
+    assert [o["id"] for o in tableware(summary)] == ["e:2", "e:1"], "the flat thing on the floor is not picked up"
