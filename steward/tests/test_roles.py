@@ -59,3 +59,11 @@ def test_telemetry_carries_each_objects_role_next_to_its_perceived_category():
     entities = {e["id"]: e for e in runtime._telemetry_scene()["entities"]}
     assert entities["e:2"]["category"]["value"] == "table"
     assert entities["e:2"]["stateVars"]["role"]["value"] == "cabinet" and entities["e:1"]["stateVars"]["role"]["value"] == "table"
+
+
+def test_a_second_one_of_a_kind_object_is_not_given_the_taken_role():
+    corner = _obj("e:132", "counter", {"counter": 0.56, "sideboard": 0.37, "unknown": 0.05, "table": 0.02},
+                  [2.94, 2.06, 0.76], [1.21, 0.5, 1.48])
+    roles = assign_roles([*SCENE, corner], RoleConfig())
+    assert roles["e:40"][0] == "counter" and roles["e:39"][0] == "sideboard"
+    assert roles["e:132"][0] == "unknown", "the home's one counter and one sideboard are elsewhere"

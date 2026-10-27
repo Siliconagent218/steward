@@ -15,6 +15,7 @@ import math
 from dataclasses import dataclass
 
 DRAWER_FURNITURE = ("sideboard", "cabinet")
+UNKNOWN = "unknown"
 
 
 @dataclass
@@ -38,8 +39,9 @@ def assign_roles(objects: list[dict], config: RoleConfig) -> dict[str, tuple[str
 
     Within each group, (object, category) pairs are taken from the most to the least probable; a
     pair is accepted when the object has no role yet and the category is not a singleton already
-    taken. An object outside every group, or whose group categories are all taken, keeps its
-    perceived category.
+    taken. An object outside every group keeps its perceived category; one whose possible group
+    categories are all one-of-a-kind and taken gets its likeliest category outside the group, or
+    ``unknown``, so that a task never picks it as the one sideboard or table of the home.
 
     :param objects: summary objects with ``id``, ``category``, ``categories``, ``existence``,
         ``position``, ``yawDeg`` and ``extentM`` or ``sizeM``.
@@ -70,9 +72,19 @@ def assign_roles(objects: list[dict], config: RoleConfig) -> dict[str, tuple[str
             chosen[oid] = c
             taken.add(c)
         for oid in members:
-            c = chosen.get(oid) or max((k for k in group if k in probs[oid]), key=probs[oid].get)
-            in_group = sum(probs[oid].get(k, 0.0) for k in group) or 1.0
-            roles[oid] = (c, probs[oid].get(c, 0.0) / in_group)
+            if oid in chosen:
+                in_group = sum(probs[oid].get(k, 0.0) for k in group) or 1.0
+                roles[oid] = (chosen[oid], probs[oid][chosen[oid]] / in_group)
+                continue
+            free = [k for k in group if k in probs[oid] and k not in config.singletons]
+            if free:
+                c = max(free, key=probs[oid].get)
+                roles[oid] = (c, probs[oid][c])
+                continue
+            # Every one-of-a-kind category it could be is taken by a likelier object: by the robot's
+            # knowledge of its home it is none of them.
+            outside = {k: v for k, v in probs[oid].items() if k not in group and v >= config.min_probability}
+            roles[oid] = max(outside.items(), key=lambda kv: kv[1]) if outside else (UNKNOWN, 0.0)
     return roles
 
 
