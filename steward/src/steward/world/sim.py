@@ -13,7 +13,6 @@ frame. It never reports World State identifiers.
 from __future__ import annotations
 
 import copy
-import io
 import math
 import queue
 import threading
@@ -22,9 +21,8 @@ from dataclasses import dataclass, field
 
 import mujoco
 import numpy as np
-from PIL import Image
 
-from steward.glrender import close_renderer, free_camera
+from steward.glrender import close_renderer, encode_image, free_camera
 from steward.math3d import matrix_from_quat, pose_compose, pose_inverse, quat_from_yaw, quat_mul, quat_normalize, yaw_from_quat
 from steward.scene.extent import entity_body_ids, entity_obb
 from steward.scene.mjcf import MjcfBuild, build_mjcf
@@ -79,6 +77,7 @@ class _RenderRequest:
     camera: str | dict
     width: int
     height: int
+    fmt: str = "png"
     done: threading.Event = field(default_factory=threading.Event)
     png: bytes = b""
     error: Exception | None = None
@@ -747,17 +746,18 @@ class WorldSim:
         """Vertical field of view in degrees used by free-camera renders."""
         return float(self.model.vis.global_.fovy)
 
-    def render(self, camera: str | dict, width: int = 640, height: int = 480, timeout: float = 10.0) -> bytes:
-        """Render an RGB PNG from a named MuJoCo camera, or from a free camera given as
-        ``{"lookat": [x, y, z], "distance": d, "azimuth": deg, "elevation": deg}``.
+    def render(self, camera: str | dict, width: int = 640, height: int = 480, timeout: float = 10.0,
+               fmt: str = "png") -> bytes:
+        """Render an RGB image (``fmt`` ``png`` or ``jpeg``) from a named MuJoCo camera, or from a free
+        camera given as ``{"lookat": [x, y, z], "distance": d, "azimuth": deg, "elevation": deg}``.
 
         OpenGL rendering must run on the main thread on macOS. Calls from other threads queue a
         request and wait for the main thread to serve it through :meth:`pump`; without a pumping
         main thread they raise ``TimeoutError`` instead of blocking the simulation.
         """
         if threading.current_thread() is threading.main_thread():
-            return self._render_now(camera, width, height)
-        request = _RenderRequest(camera, width, height)
+            return self._render_now(camera, width, height, fmt)
+        request = _RenderRequest(camera, width, height, fmt)
         self._render_requests.put(request)
         if not request.done.wait(timeout):
             raise TimeoutError("rendering needs the main thread to call WorldSim.pump()")
@@ -773,7 +773,7 @@ class WorldSim:
             return
         while True:
             try:
-                request.png = self._render_now(request.camera, request.width, request.height)
+                request.png = self._render_now(request.camera, request.width, request.height, request.fmt)
             except Exception as exc:  # noqa: BLE001 - re-raised on the requesting thread
                 request.error = exc
             request.done.set()
@@ -782,7 +782,7 @@ class WorldSim:
             except queue.Empty:
                 return
 
-    def _render_now(self, camera: str | dict, width: int, height: int) -> bytes:
+    def _render_now(self, camera: str | dict, width: int, height: int, fmt: str = "png") -> bytes:
         with self.lock:
             key = (width, height)
             if key not in self._renderers:
@@ -800,10 +800,7 @@ class WorldSim:
                         self.model.geom_group[gid] = group
             else:
                 renderer.update_scene(self.data, camera=camera)
-            img = renderer.render()
-        buf = io.BytesIO()
-        Image.fromarray(img).save(buf, format="PNG")
-        return buf.getvalue()
+        return encode_image(renderer.render(), fmt)
 
     def _cutaway_walls(self, spec: dict) -> list[int]:
         """Geoms of environment walls on the camera side of the room, hidden in free-camera views

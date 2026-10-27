@@ -30,6 +30,10 @@ def test_episode_load_and_reset_over_wca_run_on_main_thread(kitchen_root, tmp_pa
         wca = host.wca.url
         png = _pump_while(host, lambda: call("GET", f"{wca}/wca/render?camera=overview&width=160&height=120"))
         assert png["value"].startswith(b"\x89PNG")
+        jpeg = _pump_while(host, lambda: call("GET", f"{wca}/wca/render?camera=overview&width=160&height=120&format=jpeg"))
+        assert jpeg["value"].startswith(b"\xff\xd8")
+        bad = _pump_while(host, lambda: call("GET", f"{wca}/wca/render?camera=overview&format=gif"))
+        assert bad["error"].status == 400
         loaded = _pump_while(host, lambda: call("POST", f"{wca}/wca/episode",
                                                 {"action": "load", "scenario": "phase0-kitchen"}))
         assert loaded["value"]["scenario"] == "phase0-kitchen"

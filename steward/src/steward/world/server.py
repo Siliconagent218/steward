@@ -19,12 +19,21 @@ from pathlib import Path
 from typing import Any
 
 from steward.authoring.service import AuthoringError, AuthoringService
+from steward.glrender import IMAGE_FORMATS
 from steward.net import Binary, HttpError, JsonServer
 from steward.observer.observer import Observer
 from steward.world.console import CONSOLE_HTML, console_state
 from steward.world.ego_view import EgoViewRenderer
 from steward.world.chat import ChatConfig, HarnessChat
 from steward.world.sim import EditError, WorldSim
+
+
+def image_format(query: dict) -> str:
+    """``format`` query parameter of an image route: ``png`` (default) or ``jpeg``."""
+    fmt = query.get("format", "png")
+    if fmt not in IMAGE_FORMATS:
+        raise HttpError(400, f"format must be one of {sorted(IMAGE_FORMATS)}")
+    return fmt
 
 
 @dataclass
@@ -181,7 +190,9 @@ class StewardHost:
                     raise HttpError(400, f"free camera needs lookat=x,y,z, distance, azimuth, elevation: {exc}") from None
                 if len(lookat) != 3 or camera["distance"] <= 0:
                     raise HttpError(400, "free camera needs three lookat values and a positive distance")
-            return Binary(sim.render(camera, int(q.get("width", 800)), int(q.get("height", 600))), "image/png")
+            fmt = image_format(q)
+            return Binary(sim.render(camera, int(q.get("width", 800)), int(q.get("height", 600)), fmt=fmt),
+                          IMAGE_FORMATS[fmt])
 
         def console_page(q, b):
             return Binary(CONSOLE_HTML.read_bytes(), "text/html; charset=utf-8")
@@ -196,9 +207,9 @@ class StewardHost:
                           "azimuth": float(q["azimuth"]), "elevation": float(q["elevation"])}
             except (KeyError, ValueError) as exc:
                 raise HttpError(400, f"ego render needs lookat=x,y,z, distance, azimuth, elevation: {exc}") from None
-            width, height = int(q.get("width", 800)), int(q.get("height", 600))
-            png = self.on_main(lambda: self.ego_view.render(robot, ego, camera, width, height))
-            return Binary(png, "image/png")
+            width, height, fmt = int(q.get("width", 800)), int(q.get("height", 600)), image_format(q)
+            image = self.on_main(lambda: self.ego_view.render(robot, ego, camera, width, height, fmt))
+            return Binary(image, IMAGE_FORMATS[fmt])
 
         return {
             ("GET", "/"): console_page,
@@ -279,8 +290,9 @@ class StewardHost:
     def _robot_routes(self, rid: str) -> dict:
         def camera(q, b):
             sim = self._require_sim()
-            png = sim.render(sim.robot_camera_name(rid), int(q.get("width", 320)), int(q.get("height", 240)))
-            return Binary(png, "image/png")
+            fmt = image_format(q)
+            image = sim.render(sim.robot_camera_name(rid), int(q.get("width", 320)), int(q.get("height", 240)), fmt=fmt)
+            return Binary(image, IMAGE_FORMATS[fmt])
 
         def telemetry(q, b):
             if not isinstance(b, dict):

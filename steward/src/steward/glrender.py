@@ -5,7 +5,25 @@ All rendering runs on the process main thread (macOS OpenGL rule).
 
 from __future__ import annotations
 
+import io
+
 import mujoco
+import numpy as np
+from PIL import Image
+
+IMAGE_FORMATS = {"png": "image/png", "jpeg": "image/jpeg"}
+
+
+def encode_image(pixels: np.ndarray, fmt: str = "png") -> bytes:
+    """Encode RGB pixels as PNG (lossless) or JPEG (quality 85, several times faster to encode)."""
+    buf = io.BytesIO()
+    if fmt == "jpeg":
+        Image.fromarray(pixels).save(buf, format="JPEG", quality=85)
+    elif fmt == "png":
+        Image.fromarray(pixels).save(buf, format="PNG")
+    else:
+        raise ValueError(f"image format must be one of {sorted(IMAGE_FORMATS)}, got {fmt!r}")
+    return buf.getvalue()
 
 
 def close_renderer(renderer: mujoco.Renderer) -> None:

@@ -15,15 +15,13 @@ the main thread (OpenGL); the Steward host routes them there.
 from __future__ import annotations
 
 import copy
-import io
 import math
 from dataclasses import dataclass, field
 
 import mujoco
 import numpy as np
-from PIL import Image
 
-from steward.glrender import close_renderer, free_camera
+from steward.glrender import close_renderer, encode_image, free_camera
 from steward.math3d import yaw_from_quat
 from steward.scene.mjcf import MjcfBuild, build_mjcf
 from steward.scene.schema import SceneState
@@ -93,7 +91,7 @@ class EgoViewRenderer:
     def __init__(self) -> None:
         self._compiled: dict[str, _Compiled] = {}
 
-    def render(self, robot_id: str, ego: dict, camera: dict, width: int, height: int) -> bytes:
+    def render(self, robot_id: str, ego: dict, camera: dict, width: int, height: int, fmt: str = "png") -> bytes:
         az = math.radians(float(camera["azimuth"]))
         toward_camera = np.zeros(2) if float(camera["elevation"]) < -80 else np.array([-math.cos(az), -math.sin(az)])
         room_center = [float(camera["lookat"][0]), float(camera["lookat"][1])]
@@ -115,9 +113,7 @@ class EgoViewRenderer:
             compiled.renderers[(width, height)] = mujoco.Renderer(compiled.model, height, width)
         renderer = compiled.renderers[(width, height)]
         renderer.update_scene(compiled.data, camera=free_camera(camera))
-        buf = io.BytesIO()
-        Image.fromarray(renderer.render()).save(buf, format="PNG")
-        return buf.getvalue()
+        return encode_image(renderer.render(), fmt)
 
     @staticmethod
     def _update(compiled: _Compiled, scene: SceneState) -> None:

@@ -94,6 +94,10 @@
     <option value="0.5">0.5×</option><option value="1">1×</option><option value="2">2×</option>
     <option value="4">4×</option><option value="8">8×</option>
   </select>
+  <select id="fps" title="渲染帧率：世界视图、自我态视图与机器人相机每秒最多请求的帧数；控制台状态刷新最多每秒 5 次">
+    <option value="25">25 fps</option><option value="10">10 fps</option><option value="5">5 fps</option>
+    <option value="3">3 fps</option><option value="1">1 fps</option>
+  </select>
   <span class="pill" id="clock">t = –</span>
   <span class="task" id="task"></span>
   <span class="spacer"></span>
@@ -113,6 +117,7 @@
     <div class="panes">
       <div>
         <div class="pane-title"><span class="dot" style="background:var(--gt)"></span>World State
+          <span class="sub" id="fpsWorld"></span>
           <span class="sub">世界真实状态（WSim 渲染）</span></div>
         <div class="viewport" id="vpWorld">
           <img id="imgWorld" alt="World State">
@@ -122,7 +127,7 @@
       </div>
       <div>
         <div class="pane-title"><span class="dot" style="background:var(--ego)"></span>Ego State
-          <span class="sub" id="egoSub">机器人自我态（同一转换器渲染）</span></div>
+          <span class="sub" id="egoSub">机器人自我态（同一转换器渲染）</span><span class="sub" id="fpsEgo"></span></div>
         <div class="viewport" id="vpEgo">
           <img id="imgEgo" alt="Ego State">
           <canvas id="ovEgo" width="1024" height="768"></canvas>
@@ -183,9 +188,44 @@ const COLOR_NAMES = { red: '红', green: '绿', blue: '蓝', black: '黑', clear
 const RENDER_W = 1024, RENDER_H = 768;
 let state = null, robotId = null, view = null, viewKey = '';
 const panes = {
-  world: { img: 'imgWorld', overlay: 'ovWorld', rendered: null },
-  ego: { img: 'imgEgo', overlay: 'ovEgo', rendered: null },
+  world: { img: 'imgWorld', overlay: 'ovWorld', label: 'fpsWorld', rendered: null, busy: false, shown: null, meter: null },
+  ego: { img: 'imgEgo', overlay: 'ovEgo', label: 'fpsEgo', rendered: null, busy: false, shown: null, meter: null },
 };
+
+// -------------------------------------------------------------- frame rate
+const FPS_KEY = 'steward.console.fps';
+const FPS_CHOICES = [25, 10, 5, 3, 1];
+let fps = FPS_CHOICES.includes(Number(localStorage.getItem(FPS_KEY))) ? Number(localStorage.getItem(FPS_KEY)) : 10;
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+function rateMeter() {
+  const frames = [];
+  return () => {
+    const now = performance.now();
+    frames.push(now);
+    while (frames.length && frames[0] < now - 3000) frames.shift();
+    return frames.length > 1 ? (frames.length - 1) * 1000 / (now - frames[0]) : 0;
+  };
+}
+async function paced(task, rate) {
+  let due = performance.now();
+  for (;;) {
+    if (!document.hidden) {
+      try { await task(); } catch (e) { /* a failed frame is retried on the next tick */ }
+    }
+    const period = 1000 / rate();
+    due = Math.max(due + period, performance.now() - period);
+    await sleep(Math.max(0, due - performance.now()));
+  }
+}
+async function showBlob(img, res, previous) {
+  const url = URL.createObjectURL(await res.blob());
+  const next = new Image();
+  next.src = url;
+  await next.decode();
+  img.src = url;
+  if (previous) URL.revokeObjectURL(previous);
+  return url;
+}
 
 async function api(method, path, body) {
   const res = await fetch(path, { method, headers: { 'content-type': 'application/json' },
@@ -280,25 +320,29 @@ function drawOverlays() { drawWorldOverlay(); drawEgoOverlay(); }
 // ------------------------------------------------------------------ renders
 function cameraQuery(cam) {
   return `lookat=${cam.lookat.join(',')}&distance=${cam.distance}&azimuth=${cam.azimuth}&elevation=${cam.elevation}`
-    + `&width=${RENDER_W}&height=${RENDER_H}&t=${Date.now()}`;
+    + `&width=${RENDER_W}&height=${RENDER_H}&format=jpeg`;
 }
-function requestRender(name) {
+async function requestRender(name) {
   const pane = panes[name], img = $(pane.img);
-  if (!view || img.dataset.busy === '1') return;
+  if (!view || pane.busy) return;
   if (name === 'ego' && !(state && robotId && state.robots[robotId] && state.robots[robotId].ego)) return;
-  img.dataset.busy = '1';
-  const cam = { ...view };
-  const url = name === 'world'
-    ? `/wca/render?camera=free&${cameraQuery(cam)}`
-    : `/console/ego-render?robot=${encodeURIComponent(robotId)}&${cameraQuery(cam)}`;
-  const next = new Image();
-  next.onload = () => {
-    img.src = next.src; pane.rendered = cam; img.dataset.busy = '0';
+  pane.busy = true;
+  try {
+    const cam = { ...view };
+    const url = name === 'world'
+      ? `/wca/render?camera=free&${cameraQuery(cam)}`
+      : `/console/ego-render?robot=${encodeURIComponent(robotId)}&${cameraQuery(cam)}`;
+    const res = await fetch(url, { cache: 'no-store' });
+    if (!res.ok) return;
+    pane.shown = await showBlob(img, res, pane.shown);
+    pane.rendered = cam;
+    pane.meter = pane.meter || rateMeter();
+    $(pane.label).textContent = `· ${pane.meter().toFixed(1)} fps`;
     if (name === 'ego') $('egoEmpty').style.display = 'none';
     drawOverlays();
-  };
-  next.onerror = () => { img.dataset.busy = '0'; };
-  next.src = url;
+  } finally {
+    pane.busy = false;
+  }
 }
 function requestRenders() { requestRender('world'); requestRender('ego'); }
 function setView(v) { view = v; requestRenders(); }
@@ -509,34 +553,15 @@ document.querySelectorAll('[data-target]').forEach(b => b.onclick = () => { chat
 $('chatReset').onclick = async () => { try { await api('POST', '/console/chat/reset', { agent: chatTarget }); refreshChat(); } catch (e) { showError(e); } };
 renderTarget();
 
-const CAMERA_FPS = 15;
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-async function robotCameraLoop() {
-  const img = $('camRobot'), frames = [], period = 1000 / CAMERA_FPS;
-  let shown = null, due = performance.now();
-  for (;;) {
-    if (robotId && !document.hidden) {
-      try {
-        const res = await fetch(`/wca/render?camera=${encodeURIComponent('robot:' + robotId)}&width=480&height=360`, { cache: 'no-store' });
-        if (res.ok) {
-          const url = URL.createObjectURL(await res.blob());
-          const next = new Image();
-          next.src = url;
-          await next.decode();
-          img.src = url;
-          if (shown) URL.revokeObjectURL(shown);
-          shown = url;
-          const now = performance.now();
-          frames.push(now);
-          while (frames.length && frames[0] < now - 2000) frames.shift();
-          const fps = frames.length > 1 ? (frames.length - 1) * 1000 / (now - frames[0]) : 0;
-          $('robotCamLabel').textContent = `${robotId} 头部相机 · ${fps.toFixed(1)} fps`;
-        }
-      } catch (e) { /* a dropped frame is retried on the next tick */ }
-    }
-    due = Math.max(due + period, performance.now() - period);
-    await sleep(Math.max(0, due - performance.now()));
-  }
+const cameraMeter = rateMeter();
+let cameraShown = null;
+async function refreshRobotCamera() {
+  if (!robotId) return;
+  const res = await fetch(`/wca/render?camera=${encodeURIComponent('robot:' + robotId)}&width=480&height=360&format=jpeg`,
+    { cache: 'no-store' });
+  if (!res.ok) return;
+  cameraShown = await showBlob($('camRobot'), res, cameraShown);
+  $('robotCamLabel').textContent = `${robotId} 头部相机 · ${cameraMeter().toFixed(1)} fps`;
 }
 
 async function loadScenarios() {
@@ -552,10 +577,13 @@ $('pause').onclick = async () => { try { await api('POST', '/wca/clock', { actio
 $('speed').onchange = async () => { try { await api('POST', '/wca/clock', { action: 'speed', value: Number($('speed').value) }); refresh(); } catch (e) { showError(e); } };
 for (const id of ['showGtLabels', 'showEgoLabels', 'showSigma', 'showError']) $(id).onchange = drawOverlays;
 
+$('fps').value = String(fps);
+$('fps').onchange = () => { fps = Number($('fps').value); localStorage.setItem(FPS_KEY, String(fps)); };
 refresh().then(loadScenarios);
-setInterval(refresh, 500);
-setInterval(requestRenders, 400);
-robotCameraLoop();
+paced(refresh, () => Math.min(fps, 5));
+paced(() => requestRender('world'), () => fps);
+paced(() => requestRender('ego'), () => fps);
+paced(refreshRobotCamera, () => fps);
 refreshChat();
 setInterval(refreshChat, 800);
 </script>
