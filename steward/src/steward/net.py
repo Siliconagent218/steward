@@ -7,8 +7,11 @@ that robot's sensor, actuator and telemetry channels, and the Ego API port is lo
 
 from __future__ import annotations
 
+import errno
 import json
+import sys
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -39,7 +42,11 @@ NO_CONTENT = object()
 
 
 class JsonServer:
-    def __init__(self, routes: dict[tuple[str, str], Handler], host: str = "127.0.0.1", port: int = 0, name: str = ""):
+    """Serves ``routes`` on one port. A fixed port that is still held (a service just restarted on
+    it) is retried for up to ``bind_wait_s`` seconds before the bind error is raised."""
+
+    def __init__(self, routes: dict[tuple[str, str], Handler], host: str = "127.0.0.1", port: int = 0, name: str = "",
+                 bind_wait_s: float = 0.0):
         self.routes = routes
         self.name = name
         server = self
@@ -99,7 +106,18 @@ class JsonServer:
             def do_POST(self):  # noqa: N802 - http.server naming
                 self._dispatch("POST")
 
-        self._httpd = ThreadingHTTPServer((host, port), _Handler)
+        deadline, waited = time.monotonic() + bind_wait_s, False
+        while True:
+            try:
+                self._httpd = ThreadingHTTPServer((host, port), _Handler)
+                break
+            except OSError as exc:
+                if exc.errno != errno.EADDRINUSE or port == 0 or time.monotonic() >= deadline:
+                    raise
+                waited = True
+                time.sleep(0.5)
+        if waited:
+            print(f"{name or 'server'}: port {port} was still held; bound after waiting", file=sys.stderr, flush=True)
         self._httpd.daemon_threads = True
         self._thread: threading.Thread | None = None
 

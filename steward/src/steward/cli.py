@@ -61,7 +61,7 @@ def _host(args, run_dir: Path):
     ports = {"w:robot-1": args.robot_port} if getattr(args, "robot_port", 0) else {}
     return StewardHost(args.root, scenario=args.scenario, speed=args.speed, seed=args.seed, run_dir=run_dir,
                        wca_port=args.wca_port, robot_ports=ports, chat=_chat_config(args),
-                       phase=args.phase).start()
+                       phase=args.phase, bind_wait_s=getattr(args, "bind_wait", 0.0)).start()
 
 
 def _chat_config(args):
@@ -88,19 +88,19 @@ def cmd_world(args) -> int:
     return 0
 
 
-def _start_ego(robot_url: str, api_port: int, out_dir: Path):
+def _start_ego(robot_url: str, api_port: int, out_dir: Path, bind_wait_s: float = 0.0):
     from steward.ego.runtime import EgoRuntime, RobotLink
     from steward.ego.server import ego_api
 
     runtime = EgoRuntime(RobotLink(robot_url), _robot_model(), out_dir=out_dir)
     runtime.start()
-    api = ego_api(runtime, port=api_port).start()
+    api = ego_api(runtime, port=api_port, bind_wait_s=bind_wait_s).start()
     return runtime, api
 
 
 def cmd_ego(args) -> int:
     out_dir = Path(args.out_dir) if args.out_dir else Path(args.root) / "ego" / "observations"
-    runtime, api = _start_ego(args.robot_url, args.api_port, out_dir)
+    runtime, api = _start_ego(args.robot_url, args.api_port, out_dir, args.bind_wait)
     print(json.dumps({"egoApi": api.url, "robot": args.robot_url}), flush=True)
     if args.parent_pid:
         _exit_with_parent(args.parent_pid)
@@ -124,7 +124,8 @@ class _EgoProcess:
 
     def __init__(self, args, robot_url: str, out_dir: Path):
         cmd = [sys.executable, "-m", "steward.cli", "--root", str(args.root), "ego", "--robot-url", robot_url,
-               "--api-port", str(args.api_port), "--out-dir", str(out_dir), "--parent-pid", str(os.getpid())]
+               "--api-port", str(args.api_port), "--out-dir", str(out_dir), "--parent-pid", str(os.getpid()),
+               "--bind-wait", str(args.bind_wait)]
         self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True, start_new_session=True)
         first = self.proc.stdout.readline()
         if not first:
@@ -436,6 +437,8 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--wca-port", type=int, default=0 if in_process else 7400)
         p.add_argument("--robot-port", type=int, default=0 if in_process else 7410)
         if not in_process:
+            p.add_argument("--bind-wait", type=float, default=10.0,
+                           help="seconds to wait for a fixed port still held by a service that just stopped")
             p.add_argument("--world-harness", default=str(STEWARD_DIR / "var" / "dsh" / "world"),
                            help="DSH home of the World Harness used by the console chat; '' disables it")
             p.add_argument("--robot-harness", default=str(STEWARD_DIR / "var" / "dsh" / "robot-1"),
@@ -459,6 +462,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--api-port", type=int, default=7420)
     p.add_argument("--out-dir", help="where the runtime writes its observations (default: <root>/ego/observations)")
     p.add_argument("--parent-pid", type=int, help="exit when this process is gone (set by `steward up`)")
+    p.add_argument("--bind-wait", type=float, default=10.0,
+                   help="seconds to wait for a fixed port still held by a service that just stopped")
     p.set_defaults(fn=cmd_ego)
     args = parser.parse_args(argv)
     return args.fn(args)

@@ -54,7 +54,7 @@ class _MainTask:
 class StewardHost:
     def __init__(self, root: Path | str, *, scenario: str | None = None, speed: float = 1.0, seed: int = 0,
                  run_dir: Path | None = None, wca_port: int = 0, robot_ports: dict[str, int] | None = None,
-                 chat: ChatConfig | None = None, phase: str = DEFAULT_PHASE):
+                 chat: ChatConfig | None = None, phase: str = DEFAULT_PHASE, bind_wait_s: float = 0.0):
         phase_modules(phase)
         self.phase = phase
         self.authoring = AuthoringService(root)
@@ -65,7 +65,8 @@ class StewardHost:
         self.sim: WorldSim | None = None
         self.scenario: dict | None = None
         self.observer = Observer(self._require_sim, run_dir, phase=lambda: self.phase)
-        self.wca = JsonServer(self._wca_routes(), port=wca_port, name="wca")
+        self.bind_wait_s = bind_wait_s
+        self.wca = JsonServer(self._wca_routes(), port=wca_port, name="wca", bind_wait_s=bind_wait_s)
         self._robot_port_config = robot_ports or {}
         self.robot_servers: dict[str, JsonServer] = {}
         self._main_tasks: queue.Queue[_MainTask] = queue.Queue()
@@ -87,7 +88,8 @@ class StewardHost:
         self.observer.reset()
         for rid in scenario["robots"]:
             if rid not in self.robot_servers:
-                server = JsonServer(self._robot_routes(rid), port=self._robot_port_config.get(rid, 0), name=f"robot-{rid}")
+                server = JsonServer(self._robot_routes(rid), port=self._robot_port_config.get(rid, 0), name=f"robot-{rid}",
+                                    bind_wait_s=self.bind_wait_s)
                 self.robot_servers[rid] = server.start()
         return {"scenario": name, "robots": {rid: self.robot_servers[rid].url for rid in scenario["robots"]},
                 "task": scenario["task"]}

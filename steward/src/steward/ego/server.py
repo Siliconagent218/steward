@@ -13,7 +13,7 @@ from steward.net import NO_CONTENT, HttpError, JsonServer
 from steward.viewloop import ViewSettings, frame_response
 
 
-def ego_api(runtime: EgoRuntime, port: int = 0) -> JsonServer:
+def ego_api(runtime: EgoRuntime, port: int = 0, bind_wait_s: float = 0.0) -> JsonServer:
     def guarded(route, fn):
         def wrapped(q, b):
             try:
@@ -79,4 +79,4 @@ def ego_api(runtime: EgoRuntime, port: int = 0) -> JsonServer:
         ("POST", "/skill/wait"): lambda q, b: runtime.wait(b["job"], float(b.get("timeoutS", 120))),
         ("POST", "/skill/stop"): lambda q, b: runtime.stop_motion(),
     }
-    return JsonServer({k: guarded(k, v) for k, v in routes.items()}, port=port, name="ego-api")
+    return JsonServer({k: guarded(k, v) for k, v in routes.items()}, port=port, name="ego-api", bind_wait_s=bind_wait_s)
