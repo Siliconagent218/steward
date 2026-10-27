@@ -73,3 +73,28 @@ def test_robot_alerts_are_printed_in_the_chat_and_returned_for_the_ego_view(tmp_
         assert chat.state()["agents"]["robot"]["alerts"] == []
     finally:
         api.stop()
+
+
+def test_a_published_plan_is_validated_and_shown_with_the_running_skill(tmp_path):
+    runtime = EgoRuntime(RobotLink("http://127.0.0.1:1"), steward_bot().to_dict())
+    api = ego_api(runtime).start()
+    home = tmp_path / "robot-1"
+    (home / "profiles" / "ego").mkdir(parents=True)
+    try:
+        assert call("GET", f"{api.url}/ego/plan")["plan"] is None
+        try:
+            call("POST", f"{api.url}/ego/plan", {"goal": "整理", "steps": [{"name": "餐桌", "status": "maybe"}]})
+            raise AssertionError("expected a 409")
+        except HttpError as exc:
+            assert exc.status == 409
+        call("POST", f"{api.url}/ego/plan", {"goal": "家务循环", "source": "家务循环", "round": 3, "state": "escaping",
+                                             "current": "自救：后撤", "difficulty": "连续 3 个阶段失败",
+                                             "steps": [{"name": "餐桌", "status": "failed"}, {"name": "抽屉", "status": "pending"}]})
+        chat = HarnessChat(ChatConfig(dsh=tmp_path / "dsh", cwd=tmp_path, env_file=tmp_path / ".env", robot_home=home,
+                                      ego_api=api.url), lambda: "unused")
+        view = chat.state()["agents"]["robot"]["plan"]
+        assert view["plan"]["state"] == "escaping" and view["plan"]["round"] == 3
+        assert [st["status"] for st in view["plan"]["steps"]] == ["failed", "pending"]
+        assert view["skill"] is None
+    finally:
+        api.stop()

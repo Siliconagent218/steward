@@ -166,7 +166,7 @@ class HarnessChat:
     def state(self, since: int = 0) -> dict:
         robot = {}
         if "robot" in self.agents and self.config and self.config.ego_api:
-            robot = {"control": self._robot_owner(), "alerts": self._robot_alerts()}
+            robot = {"control": self._robot_owner(), "alerts": self._robot_alerts(), "plan": self._robot_plan()}
         with self._lock:
             agents = {key: {"label": a.label, "available": self.unavailable_reason(key) is None,
                             "reason": self.unavailable_reason(key), "busy": a.busy, "sessionId": a.session_id}
@@ -249,6 +249,13 @@ class HarnessChat:
                           "harness": "Ego Harness", "mission": "家务任务"}.get(alert["source"], alert["source"])
                 self._add("robot", "error", f"⚠ 机器人遇到无法自行处理的情况（{source}）：{alert['message']}")
         return active
+
+    def _robot_plan(self) -> dict | None:
+        """The plan the robot last published and the skill it is running, ``None`` when unknown."""
+        try:
+            return call("GET", f"{self.config.ego_api}/ego/plan", timeout=0.5)
+        except (HttpError, OSError):  # the robot's Ego API is down or predates plans; nothing to show
+            return None
 
     def acknowledge_alerts(self) -> dict:
         if not (self.config and self.config.ego_api):

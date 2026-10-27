@@ -236,6 +236,38 @@ def test_a_repeating_failure_is_recognised_whatever_its_numbers():
     assert a != _signature("table", "cannot open e:10: ['dock pose in front of e:10 collides with e:5'] at 1.23")
 
 
+def test_a_round_without_progress_triggers_self_rescue_then_an_operator_alert(monkeypatch):
+    import steward.chores as chores_mod
+    from steward.mission import MissionFailed
+
+    events: list[str] = []
+    messages = iter(f"failure number {n} of a different kind {'x' * n}" for n in range(100))
+
+    class Stop(Exception):
+        pass
+
+    def fail(self):
+        raise MissionFailed(next(messages))
+
+    def alert(api, text, on_wait=None):
+        events.append("alert")
+        raise Stop(text)
+
+    monkeypatch.setattr(chores_mod, "_explore", lambda api, timeout_s: {"state": "succeeded"})
+    monkeypatch.setattr(chores_mod, "_wait_for_control", lambda api, on_wait=None: None)
+    monkeypatch.setattr(chores_mod, "_report_livelock", alert)
+    monkeypatch.setattr(chores_mod.Chores, "publish", lambda self, **changes: events.append(changes.get("state", "")))
+    monkeypatch.setattr(chores_mod.Chores, "recover", lambda self, message="": None)
+    monkeypatch.setattr(chores_mod.Chores, "escape", lambda self: events.append("escape"))
+    for name in ("arrange_on_table", "stack_on_sideboard", "swap_drawers"):
+        monkeypatch.setattr(chores_mod.Chores, name, fail)
+    with pytest.raises(Stop, match="没有任何进展"):
+        chores_mod.chores("http://unused", 0)
+    actions = [e for e in events if e in ("escape", "alert", "escaping", "waiting-operator")]
+    assert actions == ["escaping", "escape", "waiting-operator", "alert"], events
+    assert events.count("recovering") == 6, "three failed phases before the rescue and three after it"
+
+
 def test_one_chores_round_is_confirmed_by_world_state(kitchen_root, tmp_path):
     host = StewardHost(kitchen_root, scenario="phase0-chores", speed=10.0, seed=5, run_dir=tmp_path).start()
     runtime = EgoRuntime(RobotLink(host.robot_servers["w:robot-1"].url), steward_bot().to_dict())

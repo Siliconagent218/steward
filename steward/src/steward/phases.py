@@ -21,6 +21,8 @@ PHASES: dict[str, dict] = {
     },
 }
 DEFAULT_PHASE = "phase0"
+# The level the command line starts at: the newest phase, whose modules are being matured.
+LATEST_PHASE = "phase1"
 
 
 def phase_modules(level: str) -> dict:

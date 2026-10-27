@@ -90,6 +90,19 @@
   .alert-box b { color: #ff8a8a; display: block; margin-bottom: 4px; }
   .alert-box button { margin-top: 8px; border-color: #ff6b6b; }
   .viewport.alerting { outline: 3px solid #ff4d4d; outline-offset: -3px; }
+  .card h2 .sub { color: var(--muted); font-weight: 400; font-size: 12px; }
+  .plan-goal { font-size: 14px; margin-bottom: 8px; }
+  .plan-steps { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+  .plan-step { padding: 4px 10px; border-radius: 8px; border: 1px solid var(--line); color: var(--muted); font-size: 13px; }
+  .plan-step.done { border-color: #2f7a57; color: #8fe0b8; }
+  .plan-step.active { border-color: var(--ego); color: #ffd2a6; background: #2d2215; }
+  .plan-step.failed { border-color: #a33a3a; color: #ffb3b3; }
+  .plan-now { font-size: 13px; }
+  .plan-now .label { color: var(--muted); }
+  .plan-trouble { margin-top: 8px; padding: 6px 10px; border-radius: 8px; background: #33270f; color: #ffd27a; font-size: 13px;
+                  white-space: pre-wrap; word-break: break-word; }
+  .plan-trouble.stuck { background: #3a1f24; color: #ffb3b3; }
+  .pill.running { color: #8fe0b8; } .pill.recovering, .pill.escaping { color: #ffd27a; } .pill.waiting-operator { color: #ff8a8a; }
 </style>
 </head>
 <body>
@@ -172,6 +185,10 @@
     </div>
   </section>
   </div>
+  <section class="card" id="planCard">
+    <h2>机器人计划 <span class="pill" id="planState"></span><span class="sub" id="planMeta"></span></h2>
+    <div id="planBody" class="task">机器人尚未发布计划</div>
+  </section>
   <div class="grid3">
     <section class="card">
       <h2 id="robotCamLabel">机器人头部相机</h2>
@@ -588,10 +605,43 @@ function renderAlerts(alerts) {
     + `${last.count > 1 ? ` ×${last.count}` : ''}${more}`;
   box.hidden = false;
 }
+const PLAN_STATES = { running: '执行中', recovering: '失败后恢复中', escaping: '疑似活锁，正在自救', 'waiting-operator': '活锁，等待操作员' };
+const STEP_MARKS = { done: '✓', active: '▶', failed: '✗', pending: '○', skipped: '–', completed: '✓', in_progress: '▶' };
+function agentTodos(chat) {
+  const robot = chat.agents.robot;
+  if (!robot || !robot.busy) return null;
+  const last = [...chat.messages].reverse().find(m => m.agent === 'robot' && m.role === 'tool' && m.tool === 'todo_write'
+    && m.input && Array.isArray(m.input.todos));
+  return last ? last.input.todos : null;
+}
+function renderPlan(chat) {
+  const robot = chat.agents.robot || {};
+  const view = robot.plan, todos = agentTodos(chat);
+  const skill = view && view.skill ? `${view.skill.skill}（已执行 ${Math.max(0, (view.t - view.skill.started)).toFixed(0)} s）` : '无';
+  if (todos) {
+    $('planState').textContent = '操作员任务'; $('planState').className = 'pill running';
+    $('planMeta').textContent = '　机器人智能体（Ego Harness）的待办计划';
+    $('planBody').innerHTML = `<div class="plan-steps">${todos.map(t => `<span class="plan-step ${t.status === 'completed' ? 'done' : t.status === 'in_progress' ? 'active' : ''}">`
+      + `${STEP_MARKS[t.status] || ''} ${esc(t.content)}</span>`).join('')}</div>`
+      + `<div class="plan-now"><span class="label">正在执行的技能：</span>${esc(skill)}</div>`;
+    return;
+  }
+  const plan = view && view.plan;
+  if (!plan) { $('planState').textContent = ''; $('planMeta').textContent = ''; $('planBody').textContent = '机器人尚未发布计划'; return; }
+  $('planState').textContent = PLAN_STATES[plan.state] || plan.state;
+  $('planState').className = `pill ${plan.state}`;
+  $('planMeta').textContent = `　${plan.source}${plan.round ? ` · 第 ${plan.round} 轮` : ''} · 更新于 t = ${plan.t.toFixed(0)} s`;
+  $('planBody').innerHTML = `<div class="plan-goal">目标：${esc(plan.goal)}</div>`
+    + `<div class="plan-steps">${plan.steps.map((st, i) => `<span class="plan-step ${st.status}">${STEP_MARKS[st.status] || ''} ${i + 1}. ${esc(st.name)}</span>`).join('')}</div>`
+    + `<div class="plan-now"><span class="label">当前步骤：</span>${esc(plan.current || '–')}</div>`
+    + `<div class="plan-now"><span class="label">正在执行的技能：</span>${esc(skill)}</div>`
+    + (plan.difficulty ? `<div class="plan-trouble ${plan.state === 'waiting-operator' || plan.state === 'escaping' ? 'stuck' : ''}">遇到的困难：${esc(plan.difficulty)}</div>` : '');
+}
 async function refreshChat() {
   try {
     chatState = await api('GET', '/console/chat');
     renderAlerts((chatState.agents.robot && chatState.agents.robot.alerts) || []);
+    renderPlan(chatState);
     renderStatus();
     const sig = JSON.stringify([chatTarget, Object.values(chatState.agents).map(a => a.busy), chatState.messages]);
     if (sig !== chatSig) { chatSig = sig; renderChat(chatState); }

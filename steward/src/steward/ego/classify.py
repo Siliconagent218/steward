@@ -18,7 +18,7 @@ SHAPES: dict[str, dict] = {
     "wall": {"dims": (4.0, 0.10, 2.6), "scale": (0.3, 1.6), "floor": True, "min_top": 1.2},
     "counter": {"dims": (1.85, 0.62, 0.90), "floor": True},
     "table": {"dims": (1.20, 0.80, 0.75), "floor": True},
-    "sideboard": {"dims": (1.42, 0.47, 0.85), "floor": True},
+    "sideboard": {"dims": (1.42, 0.49, 0.85), "floor": True},
     "cabinet": {"dims": (0.62, 0.52, 0.80), "floor": True},
     "chair": {"dims": (0.47, 0.46, 0.90), "floor": True},
     "drawer": {"dims": (0.56, 0.44, 0.22), "floor": False, "min_bottom": 0.35},
@@ -31,8 +31,9 @@ SHAPES: dict[str, dict] = {
     "scissors": {"dims": (0.16, 0.07, 0.012), "floor": False},
 }
 
-UNDER = 0.55  # tolerance (log ratio) for measuring less than the prototype (partial views)
-OVER = 0.18  # tolerance for measuring more
+UNDER = (0.55, 1.2, 0.55)  # tolerance (log ratio) per axis for measuring less than the prototype; the
+# short side is usually the depth seen from the front, so it may come out much thinner
+OVER = 0.25  # tolerance for measuring more (1 cm voxels, depth noise, overhangs)
 
 
 def _color_score(rule: str | None, color: np.ndarray, invalid_frac: float) -> float:
@@ -40,11 +41,11 @@ def _color_score(rule: str | None, color: np.ndarray, invalid_frac: float) -> fl
     value, low = max(r, g, b), min(r, g, b)
     saturation = 0.0 if value == 0 else (value - low) / value
     if rule == "clear":
-        return 0.0 if invalid_frac > 0.15 or (saturation < 0.12 and value > 0.6) else -2.0
+        return 1.0 if invalid_frac > 0.15 or (saturation < 0.12 and value > 0.6) else -2.0
     if rule == "dark":
         return 0.0 if value < 0.3 else -3.0
     if rule == "brown":
-        return 0.0 if (r > g > b and 0.25 < value < 0.8 and saturation > 0.3) else -1.5
+        return 0.0 if (r > g > b and 0.25 < value < 0.8 and saturation > 0.3) else -4.0
     return 0.0
 
 
@@ -65,7 +66,7 @@ def classify(size: np.ndarray, bottom: float, color: np.ndarray, invalid_frac: f
             ratio = obs[k] / proto[k]
             scale = min(max(ratio, lo), hi)
             r = math.log(obs[k] / (proto[k] * scale))
-            cost += (r / UNDER) ** 2 if r < 0 else (r / OVER) ** 2
+            cost += (r / UNDER[k]) ** 2 if r < 0 else (r / OVER) ** 2
         if shape["floor"] != on_floor:
             cost += 6.0
         if bottom < shape.get("min_bottom", -1.0):

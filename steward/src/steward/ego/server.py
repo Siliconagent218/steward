@@ -50,6 +50,8 @@ def ego_api(runtime: EgoRuntime, port: int = 0) -> JsonServer:
         ("GET", "/ego/alerts"): lambda q, b: runtime.alerts_view(),
         ("POST", "/ego/alert"): lambda q, b: report(b),
         ("POST", "/ego/alerts/ack"): lambda q, b: runtime.acknowledge(b.get("id")),
+        ("GET", "/ego/plan"): lambda q, b: runtime.plan_view(),
+        ("POST", "/ego/plan"): lambda q, b: runtime.set_plan(b),
         ("POST", "/ego/control"): lambda q, b: control(b),
         ("POST", "/ego/predict"): lambda q, b: runtime.predict(b["skill"], b.get("params", {})),
         ("GET", "/ego/receipt"): lambda q, b: runtime.receipt(q["id"]),

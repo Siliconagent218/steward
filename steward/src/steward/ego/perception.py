@@ -111,14 +111,16 @@ def _hull(xy: np.ndarray) -> np.ndarray:
 def box_of(points: np.ndarray, trim: float = 0.0) -> tuple[np.ndarray, np.ndarray, float]:
     """Oriented box of a point set: centre, full extents (x along the longer horizontal side) and
     yaw, from the minimum-area rectangle around the footprint. With ``trim`` the box is fitted
-    again without the given share of points at either end of each axis (scattered depth noise)."""
+    again without the given share of points at either end of each horizontal axis (scattered depth
+    noise)."""
     if trim > 0 and len(points) > 50:
         centre, _, yaw = box_of(points)
         c, s = math.cos(yaw), math.sin(yaw)
         rel = points - centre
         coords = np.stack([rel[:, 0] * c + rel[:, 1] * s, -rel[:, 0] * s + rel[:, 1] * c, rel[:, 2]], axis=1)
         lo, hi = np.quantile(coords, trim, axis=0), np.quantile(coords, 1 - trim, axis=0)
-        keep = np.all((coords >= lo) & (coords <= hi), axis=1)
+        # Trim horizontally only: thin vertical parts such as table legs hold few points but set the base.
+        keep = np.all((coords[:, :2] >= lo[:2]) & (coords[:, :2] <= hi[:2]), axis=1)
         if keep.sum() >= 20:
             points = points[keep]
     xy = points[:, :2]
@@ -140,6 +142,22 @@ def box_of(points: np.ndarray, trim: float = 0.0) -> tuple[np.ndarray, np.ndarra
     if ey > ex:
         ex, ey, yaw = ey, ex, yaw + math.pi / 2
     centre_xy = mx * np.array([c, s]) + my * np.array([-s, c])
+    z_lo, z_hi = points[:, 2].min(), points[:, 2].max()
+    yaw = (yaw + math.pi / 2) % math.pi - math.pi / 2
+    return np.array([centre_xy[0], centre_xy[1], (z_lo + z_hi) / 2]), np.array([ex, ey, z_hi - z_lo]), yaw
+
+
+def box_at_yaw(points: np.ndarray, yaw: float) -> tuple[np.ndarray, np.ndarray, float]:
+    """Box of a point set in a given heading (for parts aligned with a known frame); the longer
+    horizontal side is reported as x, turning the heading by a quarter when needed."""
+    c, s = math.cos(yaw), math.sin(yaw)
+    xy = points[:, :2]
+    lx, ly = xy @ np.array([c, s]), xy @ np.array([-s, c])
+    ex, ey = lx.max() - lx.min(), ly.max() - ly.min()
+    mx, my = (lx.max() + lx.min()) / 2, (ly.max() + ly.min()) / 2
+    centre_xy = mx * np.array([c, s]) + my * np.array([-s, c])
+    if ey > ex:
+        ex, ey, yaw = ey, ex, yaw + math.pi / 2
     z_lo, z_hi = points[:, 2].min(), points[:, 2].max()
     yaw = (yaw + math.pi / 2) % math.pi - math.pi / 2
     return np.array([centre_xy[0], centre_xy[1], (z_lo + z_hi) / 2]), np.array([ex, ey, z_hi - z_lo]), yaw

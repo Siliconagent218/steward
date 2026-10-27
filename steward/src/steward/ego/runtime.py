@@ -57,6 +57,8 @@ class RobotLink:
         return call("GET", f"{self.url}/camera/rgb?width={width}&height={height}")
 
 
+PLAN_STEP_STATES = frozenset({"pending", "active", "done", "failed", "skipped"})
+
 class EgoRuntime:
     def __init__(self, link: RobotLink, robot_model: dict, config: RuntimeConfig | None = None,
                  out_dir: Path | None = None):
@@ -73,6 +75,7 @@ class EgoRuntime:
         self.control_owner: str | None = None
         self.perception_mode: str | None = None
         self.alerts: list[dict] = []
+        self.plan: dict | None = None
         self._alert_ids = itertools.count(1)
         self.executor = SkillExecutor(self.link.command, self._motion_state, self._mark_held, self.config.motion,
                                       shift=self._shift_track, on_error=lambda msg: self.alert(msg, "skill"))
@@ -187,6 +190,7 @@ class EgoRuntime:
                 "color": ent.state_vars["color"].value if "color" in ent.state_vars else None,
                 "extentM": self._extent(ent.id),
                 **({"openingM": round(self._opening(ent.id), 3)} if ent.category.value == "drawer" else {}),
+                **self._front(ent),
             })
         job = self.executor.current.to_dict() if self.executor.current else None
         return {
@@ -206,6 +210,18 @@ class EgoRuntime:
         with self._lock:
             track = self.estimator.tracks.get(track_id)
             return [round(float(v), 3) for v in track.size] if track is not None else None
+
+    def _front(self, ent) -> dict:
+        """Heading of the face looking into the room, for furniture and drawers."""
+        affordances = [a.value for a in ent.rigid.links[0].affordances]
+        if "support-surface" not in affordances and "pullable" not in affordances:
+            return {}
+        with self._lock:
+            track = self.estimator.tracks.get(ent.id)
+            if track is None:
+                return {}
+            box = self.estimator.front(track)
+        return {"frontDeg": round(math.degrees(box.yaw), 1), "frontHalfM": round(box.hx, 3)}
 
     def _opening(self, track_id: str) -> float:
         with self._lock:
@@ -287,6 +303,34 @@ class EgoRuntime:
                 if alert_id is None or record["id"] == alert_id:
                     record["acknowledged"] = True
         return self.alerts_view()
+
+    # -------------------------------------------------------------------- plan
+    def set_plan(self, plan: dict) -> dict:
+        """Publish what the robot is trying to achieve: a goal, its steps with their status, the
+        step in progress and the latest difficulty. A client (a mission script, the robot agent)
+        owns its content; the runtime only stores the latest one and stamps it."""
+        goal = plan.get("goal")
+        steps = plan.get("steps", [])
+        if not isinstance(goal, str) or not goal.strip():
+            raise ValueError("a plan needs a goal")
+        if not isinstance(steps, list) or not all(isinstance(st, dict) and isinstance(st.get("name"), str)
+                                                   and st.get("status") in PLAN_STEP_STATES for st in steps):
+            raise ValueError(f"plan steps need a name and a status in {sorted(PLAN_STEP_STATES)}")
+        record = {"goal": goal[:300], "source": str(plan.get("source", "agent"))[:60],
+                  "steps": [{"name": st["name"][:200], "status": st["status"]} for st in steps[:30]],
+                  "round": plan.get("round"), "current": str(plan.get("current") or "")[:400],
+                  "difficulty": str(plan.get("difficulty") or "")[:600], "state": str(plan.get("state") or "running")[:40],
+                  "t": round(self.estimator.stamp, 2)}
+        with self._lock:
+            self.plan = record
+        return record
+
+    def plan_view(self) -> dict:
+        """The latest published plan (``None`` before any) and the skill running now."""
+        running = next((j for j in reversed(list(self.executor.jobs.values())) if j.state == "running"), None)
+        with self._lock:
+            plan = dict(self.plan) if self.plan else None
+        return {"plan": plan, "skill": running.to_dict() if running else None, "t": round(self.estimator.stamp, 2)}
 
     # ----------------------------------------------------------------- control
     def control(self) -> dict:

@@ -86,6 +86,19 @@ def _offset(support: dict, along: float, across: float) -> list[float]:
     return [along, across] if e[0] >= e[1] else [across, along]
 
 
+def _world(support: dict, offset: list[float]) -> list[float]:
+    yaw = math.radians(support["yawDeg"])
+    c, s = math.cos(yaw), math.sin(yaw)
+    return [support["position"][0] + c * offset[0] - s * offset[1], support["position"][1] + s * offset[0] + c * offset[1]]
+
+
+def _place_at(api: str, support: dict, xy: list[float]) -> dict:
+    """Place params for a fixed world spot on a support, in the support's current frame (a fitted box
+    may turn half way round between views; the spot must not move with it)."""
+    current = _refresh(api, support)
+    return {"on": current["id"], "offset": [round(v, 4) for v in _local(current, xy)]}
+
+
 def _local(support: dict, xy: list[float]) -> tuple[float, float]:
     yaw = math.radians(support["yawDeg"])
     dx, dy = xy[0] - support["position"][0], xy[1] - support["position"][1]
@@ -123,9 +136,9 @@ def _move(api: str, obj: dict, place: dict, observe: dict, log: list, timeout_s:
 
 def _view(api: str, furniture: dict, timeout_s: float) -> None:
     """Stand in front of a piece of furniture, facing it, to see its drawer up close."""
-    yaw = math.radians(furniture["yawDeg"])
+    yaw = math.radians(furniture.get("frontDeg", furniture["yawDeg"]))
     n = (math.cos(yaw), math.sin(yaw))
-    half = (furniture["extentM"] or furniture["sizeM"])[0] / 2
+    half = furniture.get("frontHalfM", (furniture["extentM"] or furniture["sizeM"])[0] / 2)
     x = furniture["position"][0] + n[0] * (half + VIEW_DISTANCE)
     y = furniture["position"][1] + n[1] * (half + VIEW_DISTANCE)
     receipt = call("POST", f"{api}/ego/predict",
@@ -150,6 +163,21 @@ class Chores:
         self.timeout_s = timeout_s
         self.on_step = on_step
         self.log: list[dict] = []
+        self.plan = {"goal": GOAL, "source": "家务循环", "round": None, "current": "", "difficulty": "",
+                     "state": "running", "status": {phase: "pending" for phase in PHASES}}
+
+    def publish(self, **changes) -> None:
+        """Update the published plan (goal, phase status, current step, latest difficulty) that the
+        console shows. The plan is informational: a failed publish is logged and work goes on."""
+        status = changes.pop("status", {})
+        self.plan.update(changes)
+        self.plan["status"].update(status)
+        body = {key: value for key, value in self.plan.items() if key != "status"}
+        body["steps"] = [{"name": f"{PHASE_NAMES[phase]}：{PHASE_DETAILS[phase]}", "status": st} for phase, st in self.plan["status"].items()]
+        try:
+            call("POST", f"{self.api}/ego/plan", body, timeout=2.0)
+        except (HttpError, OSError) as exc:
+            self.log.append({"step": "plan-publish-failed", "error": str(exc)})
 
     def _clearing(self, phase: str, action):
         """Run ``action``; when it is blocked by movable entities, move each one out of the way
@@ -186,6 +214,7 @@ class Chores:
     def _step(self, phase: str, text: str, **extra) -> None:
         record = {"phase": phase, "text": text, **extra}
         self.log.append(record)
+        self.publish(current=text)
         if self.on_step is not None:
             self.on_step(record)
 
@@ -205,12 +234,11 @@ class Chores:
         for obj, x in zip(items, offsets, strict=True):
             obj = _refresh(self.api, obj)
             order.append(obj["id"])
-            want = _offset(table, x, TABLE_ROW_Y)
-            lx, ly = _local(table, obj["position"])
-            if obj["on"] == table["id"] and abs(lx - want[0]) < 0.03 and abs(ly - want[1]) < 0.03:
+            spot = _world(table, _offset(table, x, TABLE_ROW_Y))
+            if obj["on"] == table["id"] and math.dist(obj["position"][:2], spot) < 0.03:
                 continue
-            self._clearing("table", lambda o=obj, w=want: _move(self.api, o, {"on": table["id"], "offset": w},
-                                                                 table, self.log, self.timeout_s))
+            self._clearing("table", lambda o=obj, xy=spot: _move(self.api, o, _place_at(self.api, table, xy),
+                                                                  table, self.log, self.timeout_s))
             self._step("table", f"{obj.get('color') or ''} {obj['category']} → 餐桌第 {len(order)} 位", object=obj["id"])
         return order
 
@@ -229,8 +257,9 @@ class Chores:
             if below is None:
                 offset = next(slot)
                 if bowl["on"] != board["id"]:
-                    self._clearing("sideboard", lambda b=bowl, o=offset: _move(
-                        self.api, b, {"on": board["id"], "offset": _offset(board, o, 0.0)}, board, self.log, self.timeout_s))
+                    spot = _world(board, _offset(board, offset, 0.0))
+                    self._clearing("sideboard", lambda b=bowl, xy=spot: _move(
+                        self.api, b, _place_at(self.api, board, xy), board, self.log, self.timeout_s))
                     self._step("sideboard", f"{bowl.get('color') or ''} 碗 → 餐边柜（叠放底座）", object=bowl["id"])
             else:
                 below = _refresh(self.api, below)
@@ -245,8 +274,9 @@ class Chores:
             offset = next(slot)
             if obj["on"] == board["id"]:
                 continue
-            self._clearing("sideboard", lambda o=obj, off=offset: _move(
-                self.api, o, {"on": board["id"], "offset": _offset(board, off, 0.0)}, board, self.log, self.timeout_s))
+            spot = _world(board, _offset(board, offset, 0.0))
+            self._clearing("sideboard", lambda o=obj, xy=spot: _move(
+                self.api, o, _place_at(self.api, board, xy), board, self.log, self.timeout_s))
             self._step("sideboard", f"{obj['category']} → 餐边柜", object=obj["id"])
 
     # ----------------------------------------------------------------- drawers
@@ -319,8 +349,72 @@ class Chores:
             self.log.append({"step": "recover-failed", "error": str(exc)})
             time.sleep(2.0)
 
+    def escape(self) -> bool:
+        """Break out of a failure loop: back away from whatever the base is pressed against, then
+        tour the room and look around so that the Ego-State is rebuilt from fresh views. Returns
+        whether the robot could move at all."""
+        moved = self._unstick()
+        for x, y in self._viewpoints():
+            receipt = call("POST", f"{self.api}/ego/predict", {"skill": "navigate", "params": {"x": x, "y": y}})
+            if not receipt["withinRiskLimit"]:
+                continue
+            try:
+                _run(self.api, receipt, self.timeout_s)
+            except MissionFailed as exc:
+                self.log.append({"step": "escape-tour-failed", "error": str(exc)})
+                continue
+            moved = True
+            self._step("escape", f"自救：到 ({x:.1f}, {y:.1f}) 环顾一周，刷新对房间的感知")
+            _explore(self.api, self.timeout_s)
+        return moved
 
+    def _unstick(self) -> bool:
+        """Translate a short way, keeping the heading, in the free direction farthest from known objects."""
+        s = _summary(self.api)
+        me = s["self"]
+        heading = math.radians(me["yawDeg"])
+        centres = [o["position"][:2] for o in s["objects"] if o["existence"] >= 0.5 and o["id"] != me.get("holding")]
+        candidates = []
+        for k in range(8):
+            ang = k * math.pi / 4
+            spot = (me["x"] + UNSTICK_M * math.cos(ang), me["y"] + UNSTICK_M * math.sin(ang))
+            clearance = min((math.dist(spot, c) for c in centres), default=math.inf)
+            candidates.append((clearance, spot))
+        for _, (x, y) in sorted(candidates, reverse=True):
+            receipt = call("POST", f"{self.api}/ego/predict",
+                           {"skill": "navigate", "params": {"x": x, "y": y, "yaw": heading}})
+            if not receipt["withinRiskLimit"]:
+                continue
+            try:
+                _run(self.api, receipt, self.timeout_s)
+            except MissionFailed as exc:
+                self.log.append({"step": "unstick-failed", "error": str(exc)})
+                continue
+            self._step("escape", f"自救：底盘后撤到 ({x:.2f}, {y:.2f})，离开贴住的障碍")
+            return True
+        self._step("escape", "自救：四周都没有可行的后撤方向")
+        return False
+
+    def _viewpoints(self) -> list[tuple[float, float]]:
+        """Points between the room centre and its corners, from the walls in the Ego-State (or the
+        furniture when no wall is known yet)."""
+        s = _summary(self.api)
+        walls = _objects(s, "wall")
+        pts = [o["position"][:2] for o in (walls or s["objects"])]
+        if not pts:
+            return []
+        xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+        cx, cy = (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
+        hx, hy = (max(xs) - min(xs)) / 4, (max(ys) - min(ys)) / 4
+        return [(cx, cy), (cx - hx, cy - hy), (cx + hx, cy + hy)]
+
+
+GOAL = "家务循环：整理餐桌 → 餐边柜叠放 → 抽屉对调，周而复始"
 PHASES = ("table", "sideboard", "drawers")
+PHASE_NAMES = {"table": "餐桌按大小排列", "sideboard": "餐边柜叠放", "drawers": "抽屉对调"}
+PHASE_DETAILS = {"table": "餐具在餐桌上按占地大小排成一排", "sideboard": "碗按大小叠放，其余餐具在旁边并排",
+                 "drawers": "打开两个抽屉，对调里面的物品，再关上"}
+UNSTICK_M = 0.35
 PERCEPTION_FAILURES = ("ego state", "no drawer seen", "not seen", "lost")
 LIVELOCK_REPEATS = 2
 LIVELOCK_WAIT_S = 180.0
@@ -354,33 +448,61 @@ def chores(api: str, rounds: int, on_step=None, on_phase=None, on_failure=None, 
 
     ``on_phase(round, phase)`` is called after each completed phase and ``on_failure(round, phase,
     message)`` after a failed one; a failed phase is followed by recovery and the next phase.
+
+    A livelock is the same phase failing twice for the same reason, or a whole round of phases
+    failing for any reasons. The first one triggers :meth:`Chores.escape`; another one before any
+    phase completes raises an operator alert and waits for its acknowledgement. The goal, phase
+    status, current step and latest difficulty are published to ``/ego/plan`` throughout.
     """
     runner = Chores(api, timeout_s, on_step)
+    runner.publish(current="开局：环顾一周，建立对房间的感知")
     runner.log.append({"step": "explore", "state": _explore(api, timeout_s)["state"]})
     completed = []
-    streak: dict[str, int] = {}
+    streak: dict[str, tuple[str, int]] = {}
+    failures = 0  # consecutive failed phases, whatever their reasons
+    escaped = False
     for index in (range(rounds) if rounds > 0 else itertools.count()):
+        runner.publish(round=index + 1, status={phase: "pending" for phase in PHASES})
         for phase in PHASES:
             _wait_for_control(api, on_wait)
+            runner.publish(status={phase: "active"}, state="running", current=f"开始：{PHASE_NAMES[phase]}")
             try:
                 {"table": runner.arrange_on_table, "sideboard": runner.stack_on_sideboard,
                  "drawers": runner.swap_drawers}[phase]()
             except (MissionFailed, HttpError) as exc:
+                message = str(exc)
+                runner.publish(status={phase: "failed"}, state="recovering", difficulty=f"{PHASE_NAMES[phase]}：{message}")
                 if on_failure is not None:
-                    on_failure(index, phase, str(exc))
+                    on_failure(index, phase, message)
                 if rounds > 0:
                     raise
                 _wait_for_control(api, on_wait)
-                runner.recover(str(exc))
-                sig = _signature(phase, str(exc))
-                streak = {sig: streak.get(sig, 0) + 1}
-                if streak[sig] >= LIVELOCK_REPEATS:
-                    _report_livelock(api, f"家务循环卡住：「{phase}」阶段连续 {streak[sig]} 次因同一原因失败，"
-                                          f"已停止原地重试。原因：{str(exc)[:300]}。请移开障碍或调整任务后点「知道了」继续。",
-                                     on_wait)
-                    streak = {}
+                runner.recover(message)
+                sig = _signature(phase, message)
+                previous, count = streak.get(phase, ("", 0))
+                streak[phase] = (sig, count + 1 if sig == previous else 1)
+                failures += 1
+                if streak[phase][1] < LIVELOCK_REPEATS and failures < len(PHASES):
+                    continue
+                why = (f"「{PHASE_NAMES[phase]}」连续 {streak[phase][1]} 次因同一原因失败" if streak[phase][1] >= LIVELOCK_REPEATS
+                       else f"连续 {failures} 个阶段失败、没有任何进展")
+                streak, failures = {}, 0
+                if not escaped:
+                    escaped = True
+                    runner.publish(state="escaping", difficulty=f"疑似活锁：{why}。最近一次：{message}")
+                    try:
+                        runner.escape()
+                    except (MissionFailed, HttpError) as escape_exc:
+                        runner.log.append({"step": "escape-failed", "error": str(escape_exc)})
+                    continue
+                escaped = False
+                runner.publish(state="waiting-operator", difficulty=f"活锁：{why}，自救后仍无进展。最近一次：{message}")
+                _report_livelock(api, f"家务循环卡住：{why}，自救（后撤、巡视并重新感知）后仍无进展，已停止重试。"
+                                      f"最近一次原因：{message[:300]}。请移开障碍或调整任务后点「知道了」继续。", on_wait)
                 continue
-            streak = {}
+            streak.pop(phase, None)
+            failures, escaped = 0, False
+            runner.publish(status={phase: "done"}, state="running", difficulty="")
             completed.append((index, phase))
             if on_phase is not None:
                 on_phase(index, phase)

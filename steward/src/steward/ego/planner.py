@@ -67,9 +67,35 @@ def floor_obstacles(es: SceneState, exclude: set[str], floor_obstacle_height: fl
     return out
 
 
+def front_box(box: Box2D, room_centre: tuple[float, float] | None) -> Box2D:
+    """The same box re-expressed so that its +x axis points out of the face that looks into the room
+    (towards the room centre), with ``hx`` the half-extent along that axis. Furniture stands with its
+    back to a wall, so this is its front whatever frame the box was estimated in."""
+    if room_centre is None:
+        return box
+    to_room = (room_centre[0] - box.cx, room_centre[1] - box.cy)
+    best = None
+    for k in range(4):
+        yaw = box.yaw + k * math.pi / 2
+        hx, hy = (box.hx, box.hy) if k % 2 == 0 else (box.hy, box.hx)
+        score = math.cos(yaw) * to_room[0] + math.sin(yaw) * to_room[1]
+        if best is None or score > best[0]:
+            best = (score, Box2D(box.id, box.cx, box.cy, (yaw + math.pi) % (2 * math.pi) - math.pi, hx, hy))
+    return best[1]
+
+
+def room_centre(boxes: list[Box2D]) -> tuple[float, float] | None:
+    """Middle of everything known in the room (the extent of all boxes), or ``None`` when empty."""
+    if not boxes:
+        return None
+    xs = [c for b in boxes for c in b.corners()[:, 0]]
+    ys = [c for b in boxes for c in b.corners()[:, 1]]
+    return ((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2)
+
+
 def protrusion(drawer: Box2D, furniture: list[Box2D]) -> float:
     """How far a drawer box sticks out past the front of the furniture box that holds it, along the
-    drawer's +x (front) axis; 0 when no furniture box contains the drawer's back end."""
+    drawer's +x axis (pass a :func:`front_box`); 0 when no furniture box contains the drawer's back end."""
     n = (math.cos(drawer.yaw), math.sin(drawer.yaw))
     front = drawer.cx * n[0] + drawer.cy * n[1] + drawer.hx
     back = (drawer.cx - n[0] * (drawer.hx - 0.03), drawer.cy - n[1] * (drawer.hx - 0.03))

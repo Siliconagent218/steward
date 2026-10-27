@@ -22,7 +22,9 @@ from steward.ego.planner import (
     entity_box,
     floor_obstacles,
     path_clearance,
+    front_box,
     path_length,
+    room_centre,
     protrusion,
     rects_overlap,
 )
@@ -127,10 +129,15 @@ class Esim:
                     out.append(ent)
         return out
 
+    def _front(self, es: SceneState, ent: Entity) -> Box2D:
+        """The entity's footprint with +x pointing out of its front (the face looking into the room)."""
+        boxes = [entity_box(e)[0] for e in es.entities if e.id != es.self_id]
+        return front_box(entity_box(ent)[0], room_centre(boxes))
+
     def _opening(self, es: SceneState, drawer: Entity) -> float:
         furniture = [entity_box(e)[0] for e in es.entities
                      if e.id not in (drawer.id, es.self_id) and "support-surface" in prior(e.category.value)["affordances"]]
-        return protrusion(entity_box(drawer)[0], furniture)
+        return protrusion(self._front(es, drawer), furniture)
 
     def _support_of(self, es: SceneState, ent: Entity) -> Entity | None:
         for rel in es.relations:
@@ -570,7 +577,8 @@ class Esim:
 
     def _drawer_spot(self, es: SceneState, drawer: Entity, held: Entity, held_half: float):
         """A free spot on the drawer floor within the part that sticks out of the furniture."""
-        box, bottom, _ = entity_box(drawer)
+        _, bottom, _ = entity_box(drawer)
+        box = self._front(es, drawer)
         opening = self._opening(es, drawer)
         front_inner = box.hx - 0.05
         lo = max(-box.hx + 0.02, front_inner - opening + 0.02) + held_half
@@ -603,7 +611,8 @@ class Esim:
             raise PredictionError(f"{drawer.id} ({drawer.category.value}) is not a drawer")
         if self._held(es) is not None:
             raise PredictionError("the gripper must be empty to use a handle")
-        box, bottom, top = entity_box(drawer)
+        _, bottom, top = entity_box(drawer)
+        box = self._front(es, drawer)
         n = (math.cos(box.yaw), math.sin(box.yaw))
         handle = [box.cx + n[0] * (box.hx - 0.015), box.cy + n[1] * (box.hx - 0.015), (bottom + top) / 2]
         opening = self._opening(es, drawer)

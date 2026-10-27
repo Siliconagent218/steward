@@ -19,7 +19,7 @@ import threading
 import time
 from pathlib import Path
 
-from steward.phases import DEFAULT_PHASE, PHASES
+from steward.phases import LATEST_PHASE, PHASES
 
 STEWARD_DIR = Path(__file__).resolve().parents[2]
 DEFAULT_ROOT = STEWARD_DIR / "var" / "steward"
@@ -259,12 +259,9 @@ def cmd_shuttle(args) -> int:
     return 0 if ok else 1
 
 
-PHASE_NAMES = {"table": "餐桌按大小排列", "sideboard": "餐边柜叠放", "drawers": "抽屉对调"}
-
-
 def cmd_chores(args) -> int:
     """Repeat the chores rounds, checking every completed phase against World State."""
-    from steward.chores import chores
+    from steward.chores import PHASE_NAMES, chores
     from steward.mission import MissionFailed
     from steward.net import call
     from steward.world.chores_check import check_sideboard, check_swap, check_table, drawer_contents
@@ -368,7 +365,7 @@ def main(argv: list[str] | None = None) -> int:
         in_process = name in ("demo", "shuttle", "chores")
         p.add_argument("--speed", type=float, default=4.0 if in_process else 1.0)
         p.add_argument("--seed", type=int, default=0)
-        p.add_argument("--phase", choices=sorted(PHASES), default=DEFAULT_PHASE,
+        p.add_argument("--phase", choices=sorted(PHASES), default=LATEST_PHASE,
                        help="phase level of the replaceable modules (switchable at run time from the console)")
         p.add_argument("--wca-port", type=int, default=0 if in_process else 7400)
         p.add_argument("--robot-port", type=int, default=0 if in_process else 7410)

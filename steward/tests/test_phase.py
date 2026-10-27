@@ -109,8 +109,19 @@ def test_phase1_exploration_builds_an_accurate_ego_state_from_rgbd(kitchen_root,
         assert record["falsePositives"] <= 1, record
         assert "leak" not in record
         assert record["categoryAccuracy"] >= 0.8, record
-        categories = {o["category"] for o in call("GET", f"{api.url}/ego/summary")["objects"]}
-        assert {"bowl", "drawer"} <= categories
+        objects = call("GET", f"{api.url}/ego/summary")["objects"]
+        assert {"bowl", "drawer"} <= {o["category"] for o in objects}
+        walls = [o for o in objects if o["category"] == "wall"]
+        assert len(walls) >= 3, "near walls fill the image edge to edge and still become tracks"
+
+        def plane(wall: dict) -> tuple[str, float]:
+            yaw = math.radians(wall["yawDeg"])
+            if abs(math.cos(yaw)) > abs(math.sin(yaw)):
+                return "y", round(wall["position"][1], 1)
+            return "x", round(wall["position"][0], 1)
+
+        # One wall may stay in two pieces where furniture in front of it hides its middle.
+        assert len({plane(w) for w in walls}) >= len(walls) - 1, f"views of one wall merge into one track: {walls}"
     finally:
         api.stop()
         runtime.stop()

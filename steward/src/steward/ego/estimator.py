@@ -22,8 +22,8 @@ import numpy as np
 
 from steward.ego.classify import prototype
 from steward.ego.classify import classify
-from steward.ego.perception import box_of, segments
-from steward.ego.planner import Box2D, protrusion
+from steward.ego.perception import box_at_yaw, box_of, segments
+from steward.ego.planner import Box2D, front_box, protrusion, room_centre
 from steward.ego.priors import compatible, prior
 from steward.math3d import pose_compose, pose_inverse, quat_from_yaw, wrap_angle, yaw_from_quat
 from steward.scene.schema import Entity, Est, Link, Relation, RigidTree, SceneState, primitive
@@ -50,6 +50,8 @@ class Track:
     voxels: np.ndarray | None = None  # 1 cm voxels of every surface seen of this object (RGB-D mode)
     completion: float = 0.0  # how far the box was extended beyond what was seen (shape prior)
     settled: bool = True  # False right after the robot put it down, until it is seen again
+    mean_rgb: np.ndarray | None = None  # running mean colour of its regions (RGB-D mode)
+    mean_invalid: float = 0.0  # running mean share of its pixels without depth
 
     @property
     def category(self) -> str:
@@ -235,12 +237,15 @@ class EgoEstimator:
             matched.add(tid)
             self._fuse_cloud(self.tracks[tid], measurements[i], cam_p)
         for i, m in enumerate(measurements):
-            if i not in used and not m["seg"].border:
+            # A region cut by the image border is only part of something and waits for a full view,
+            # except a wall: a near wall always fills the image edge to edge.
+            if i not in used and (not m["seg"].border or m["probs"].get("wall", 0.0) >= 0.5):
                 track = self._new_cloud_track(m, cam_p)
                 matched.add(track.id)
         self._decay_unseen_rgbd(cam, matched, frame)
         self._merge_parts(cam_p)
         self._merge_same_surface(cam_p)
+        self._merge_walls(cam_p)
         self._follow_held()
         self.version += 1
 
@@ -297,6 +302,33 @@ class EgoEstimator:
                 del self.tracks[drop.id]
                 self._rebuild_geometry(keep, cam_p, 2.0)
 
+    def _merge_walls(self, cam_p: np.ndarray) -> None:
+        """Join wall tracks that lie in one plane and meet or nearly meet along it: separate views
+        of one wall, each cut by the image border."""
+        walls = [t for t in self.tracks.values() if t.category == "wall" and t.voxels is not None]
+        for i, a in enumerate(walls):
+            for b in walls[i + 1:]:
+                if a.id not in self.tracks or b.id not in self.tracks:
+                    continue
+                turn = abs(math.remainder(a.yaw - b.yaw, math.pi))
+                if turn > 0.2:
+                    continue
+                normal = np.array([-math.sin(a.yaw), math.cos(a.yaw)])
+                along = np.array([math.cos(a.yaw), math.sin(a.yaw)])
+                d = b.pos[:2] - a.pos[:2]
+                if abs(float(d @ normal)) > 0.1:
+                    continue
+                if abs(float(d @ along)) - (a.size[0] + b.size[0]) / 2 > 0.4:
+                    continue
+                keep, drop = (a, b) if a.observations >= b.observations else (b, a)
+                keep.voxels = self._union(keep.voxels, drop.voxels)
+                for cat, n in drop.category_counts.items():
+                    keep.category_counts[cat] = keep.category_counts.get(cat, 0.0) + n
+                keep.observations += drop.observations
+                keep.existence = max(keep.existence, drop.existence)
+                del self.tracks[drop.id]
+                self._rebuild_geometry(keep, cam_p, 2.0)
+
     @staticmethod
     def _contradicts(track: Track, m: dict) -> bool:
         """A floor-standing track and a clearly raised region (or the reverse) are not the same
@@ -345,6 +377,10 @@ class EgoEstimator:
         track.observations += 1
         track.last_seen = self.stamp
         track.existence = min(1.0, track.existence + 0.2 * (1.0 - track.existence))
+        rgb = np.asarray(seg.color, float)
+        n = track.observations
+        track.mean_rgb = rgb if track.mean_rgb is None else track.mean_rgb + (rgb - track.mean_rgb) / n
+        track.mean_invalid += (seg.invalid_frac - track.mean_invalid) / n
         if track.held:
             return
         track.settled = True
@@ -360,6 +396,35 @@ class EgoEstimator:
         track.voxels = self._union(track.voxels, _voxelize(points))
         self._rebuild_geometry(track, cam_p, seg.range)
 
+    def _furniture_of(self, drawer: Track) -> Track | None:
+        """The floor-standing furniture whose footprint holds a drawer."""
+        best = None
+        for other in self.tracks.values():
+            if other.id == drawer.id or other.footprint < 0.4 or other.bottom() > 0.1:
+                continue
+            if "support-surface" in prior(other.category)["affordances"] and _inside(other, drawer.pos, 0.1):
+                if best is None or other.observations > best.observations:
+                    best = other
+        return best
+
+    def _resting_level(self, track: Track, centre: np.ndarray, bottom: float) -> float | None:
+        """Height of the highest support below ``bottom`` (within 0.12 m) under the track's centre:
+        the top of a surface, or the floor of a larger receptacle."""
+        best = None
+        for other in self.tracks.values():
+            if other.id == track.id or other.held or not _inside(other, centre, 0.0):
+                continue
+            affordances = prior(other.category)["affordances"]
+            levels = []
+            if "support-surface" in affordances:
+                levels.append(other.top())
+            if "receptacle" in affordances and other.footprint > track.footprint:
+                levels.append(other.bottom() + 0.008)
+            for level in levels:
+                if bottom - 0.12 <= level <= bottom + 0.01 and (best is None or level > best):
+                    best = level
+        return best
+
     def _union(self, a: np.ndarray | None, b: np.ndarray) -> np.ndarray:
         merged = b if a is None else np.unique(np.vstack([a, b]), axis=0)
         if len(merged) > self.config.voxels_max:
@@ -370,6 +435,20 @@ class EgoEstimator:
         """Box from the accumulated points, completed with the category's prior size along the
         directions not yet seen; the variance shrinks with views and grows with completion."""
         centre, size, yaw = box_of(_points(track.voxels), trim=0.01)
+        parent = self._furniture_of(track) if track.category == "drawer" else None
+        if parent is not None:
+            # A drawer slides square to its furniture: take the furniture's (well-observed) heading.
+            k = round(wrap_angle(yaw - parent.yaw) / (math.pi / 2))
+            centre, size, yaw = box_at_yaw(_points(track.voxels), parent.yaw + k * math.pi / 2)
+        if track.observations > 1 and abs(wrap_angle(yaw - track.yaw)) > math.pi / 2:
+            # A box is the same turned half way round; keep the heading continuous between views.
+            yaw = wrap_angle(yaw + math.pi)
+        if track.mean_rgb is not None:
+            # The accumulated box is the best evidence of what the object is: classify it again,
+            # with confidence growing with the number of views behind it.
+            probs = classify(size, centre[2] - size[2] / 2, track.mean_rgb, track.mean_invalid)
+            weight = float(min(track.observations, 20))
+            track.category_counts = {k: v * weight for k, v in probs.items()}
         proto = prototype(track.category) if track.category_counts else None
         shift = np.zeros(3)
         completion = 0.0
@@ -399,7 +478,16 @@ class EgoEstimator:
                     shift[2] = grow / 2.0  # resting on something: the unseen part is above
                 size[2] = height
                 completion = max(completion, grow)
-        track.pos = centre + shift
+        centre = centre + shift
+        bottom = centre[2] - size[2] / 2
+        if size[0] < 0.3 and bottom > 0.15:
+            # Something small off the floor rests on something: extend the box down to the nearest
+            # surface (or receptacle floor) just below its visible part.
+            level = self._resting_level(track, centre, bottom)
+            if level is not None and level < bottom:
+                size[2] += bottom - level
+                centre[2] -= (bottom - level) / 2
+        track.pos = centre
         track.size = size
         track.yaw = yaw
         track.completion = completion
@@ -566,7 +654,10 @@ class EgoEstimator:
                     if inside is None or other.bottom() > inside.bottom():
                         inside = other
                     continue
-            if "support-surface" not in affordances or abs(other.top() - track.bottom()) > z_tol:
+            # A resting object's base is often hidden from view, so its estimate may float a little above
+            # the surface; it never sinks far into it.
+            gap = track.bottom() - other.top()
+            if "support-surface" not in affordances or not (-z_tol <= gap <= max(z_tol, 0.12)):
                 continue
             margin = max(0.02, 2.0 * track.sigma)
             if abs(local[0]) <= other.size[0] / 2 + margin and abs(local[1]) <= other.size[1] / 2 + margin:
@@ -582,7 +673,11 @@ class EgoEstimator:
         """How far a drawer sticks out of the furniture holding it, along the drawer's front axis."""
         furniture = [_box2d(t) for t in self.tracks.values()
                      if t.id != drawer.id and "support-surface" in prior(t.category)["affordances"]]
-        return protrusion(_box2d(drawer), furniture)
+        return protrusion(self.front(drawer), furniture)
+
+    def front(self, track: Track) -> Box2D:
+        """The track's footprint with +x pointing out of its front (towards the room centre)."""
+        return front_box(_box2d(track), room_centre([_box2d(t) for t in self.tracks.values()]))
 
     def shift(self, track_id: str, delta: np.ndarray) -> list[str]:
         """Move a track the robot itself moved (a drawer it pulled) together with what it holds."""
