@@ -380,3 +380,19 @@ def test_a_role_nothing_resembles_is_searched_for_before_any_guess(monkeypatch):
     monkeypatch.setattr(runner, "_search", lambda role: searched.append(role))
     assert runner._confirmed("table")["id"] == "e:51"
     assert searched == ["table"] and looked == [], "a cabinet that is 10 % table-like is not approached as the table"
+
+
+def test_a_size_ordered_row_counts_from_either_end_of_the_table():
+    def ent(eid, cat, x):
+        return {"id": eid, "category": {"value": cat}, "pose": {"value": {"p": [x, 0.0, 0.75], "q": [1, 0, 0, 0]}}}
+
+    def scene(xs):
+        ents = [ent("w:table-1", "table", 0.0)] + [ent(e, c, x) for (e, c), x in zip(
+            [("w:mug", "mug"), ("w:bowl-blue", "bowl"), ("w:bowl-red", "bowl")], xs)]
+        return {"entities": ents, "relations": [{"type": "supported-by", "a": {"entity": e["id"]}, "b": {"entity": "w:table-1"}}
+                                                for e in ents[1:]]}
+
+    boxes = {"w:mug": {"size": [0.1, 0.08, 0.1]}, "w:bowl-blue": {"size": [0.12, 0.12, 0.05]}, "w:bowl-red": {"size": [0.3, 0.3, 0.08]}}
+    assert check_table(scene([-0.3, 0.0, 0.3]), boxes)[0]
+    assert check_table(scene([0.3, 0.0, -0.3]), boxes)[0], "smallest at the other end"
+    assert not check_table(scene([0.0, -0.3, 0.3]), boxes)[0], "not in size order"

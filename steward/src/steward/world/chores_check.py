@@ -33,7 +33,8 @@ def _pose(scene: dict, eid: str) -> dict:
 
 
 def check_table(scene: dict, boxes: dict[str, dict]) -> tuple[bool, str]:
-    """All tableware rests directly on the table, ordered along the table's long axis by size."""
+    """All tableware rests directly on the table, in one row along the table's long axis ordered by
+    size from either end (the task does not say which end the smallest goes to)."""
     table = _of(scene, "table")[0]
     items = [eid for cat in TABLEWARE for eid in _of(scene, cat)]
     support = _support(scene)
@@ -47,7 +48,7 @@ def check_table(scene: dict, boxes: dict[str, dict]) -> tuple[bool, str]:
 
     by_size = sorted(items, key=lambda e: _area(boxes, e))
     by_place = sorted(items, key=along)
-    ok = not off and by_size == by_place
+    ok = not off and by_size in (by_place, by_place[::-1])
     detail = "顺序 " + " < ".join(e.removeprefix("w:") for e in by_place)
     return ok, detail + (f"；不在桌上：{off}" if off else "")
 
