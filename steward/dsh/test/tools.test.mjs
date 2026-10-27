@@ -26,6 +26,7 @@ function fakeEgo(receipts = {}) {
     job: async () => job('succeeded'),
     wait: async (id, timeoutS) => { calls.push(['wait', id, timeoutS]); return job('succeeded') },
     stop: async () => ({ stopped: null }),
+    reportProblem: async (message) => { calls.push(['report', message]); return { id: 1, message } },
   }
 }
 
@@ -40,7 +41,7 @@ function tool(tools, name) {
 test('ego tools expose the robot vocabulary without World State concepts', () => {
   const names = egoTools(fakeEgo()).map(t => t.name)
   assert.deepEqual(names, ['ego_state', 'ego_query', 'ego_observe', 'ego_explore', 'ego_predict', 'skill_run',
-    'skill_status', 'body_stop'])
+    'skill_status', 'body_stop', 'report_problem'])
   for (const t of egoTools(fakeEgo())) assert.doesNotMatch(t.description, /ground truth|world state/i)
 })
 
@@ -74,6 +75,13 @@ test('world_edit maps floor and support placements to World Control API edits', 
   ])
   await assert.rejects(edit.execute({ action: 'move', entity: 'w:cup-1', x: 1 }, exec('world_edit')), /both x and y/)
   await assert.rejects(edit.execute({ action: 'spawn', entity: 'w:x', asset: 'cup' }, exec('world_edit')), /needs a placement/)
+})
+
+test('report_problem forwards the message to the operator alert', async () => {
+  const ego = fakeEgo()
+  const result = await tool(egoTools(ego), 'report_problem').execute({ message: 'stuck' }, exec('report_problem'))
+  assert.deepEqual(ego.calls.at(-1), ['report', 'stuck'])
+  assert.equal(result.message, 'stuck')
 })
 
 test('safety policy denies skill_run without a receipt, with an unknown one, or above the risk limit', async () => {

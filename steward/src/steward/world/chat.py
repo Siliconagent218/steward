@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import tempfile
 import threading
@@ -41,10 +42,21 @@ ROBOT_BRIEF = (
     "原来的后台任务会暂停，等你这一轮结束后再继续。\n"
     "做法：先用 ego_state 看看你已经知道哪些物体；找不到或不确定时用 ego_explore 环顾，或导航靠近观察。"
     "每个动作先用 ego_predict 得到收据，风险超限就先靠近观察再预测，然后用 skill_run 执行；"
-    "执行后用 ego_state 自查结果。完成或无法完成时，用一两句中文向操作员汇报。\n\n操作员任务："
+    "执行后用 ego_state 自查结果。完成或无法完成时，用一两句中文向操作员汇报。\n"
+    "不要反复试错：ego_predict 的 issues 里给出建议时（例如「原地放下」的参数）先照做；同一个目标连续 3 次预测都不可行，"
+    "或同一个技能失败 2 次，就停止尝试：调用 report_problem 报告遇到的情况、已经尝试过什么、需要操作员做什么，"
+    "然后向操作员说明。遇到工具报错或异常且无法绕过时，同样调用 report_problem。\n\n操作员任务："
 )
 
 ROBOT_OWNER = "operator"
+
+
+def _terminate(proc: subprocess.Popen) -> None:
+    """End a harness run and any process it started (each run has its own process group)."""
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:  # the run already exited
+        pass
 
 
 def load_env_file(path: Path) -> dict[str, str]:
@@ -86,6 +98,7 @@ class _Agent:
     patch: Callable[[], str]
     before_turn: Callable[[], None] | None = None
     after_turn: Callable[[], None] | None = None
+    on_failure: Callable[[str], None] | None = None
     extra_reason: Callable[[], str | None] | None = None
     session_id: str | None = None
     busy: bool = False
@@ -118,6 +131,7 @@ class HarnessChat:
         self._entries: list[_Entry] = []
         self._next_id = 1
         self.agents: dict[str, _Agent] = {}
+        self._seen_alerts: set[int] = set()
         if config is None:
             return
         self.agents["world"] = _Agent(
@@ -133,6 +147,7 @@ class HarnessChat:
                            f"    owner: {ROBOT_OWNER}\n"),
             before_turn=lambda: self._robot_control("acquire"),
             after_turn=lambda: self._robot_control("release"),
+            on_failure=lambda message: self._robot_alert(message),
             extra_reason=lambda: None if config.ego_api else "the robot's Ego API is not known to this host")
 
     # ------------------------------------------------------------ public API
@@ -147,13 +162,16 @@ class HarnessChat:
         return agent.extra_reason() if agent.extra_reason else None
 
     def state(self, since: int = 0) -> dict:
+        robot = {}
+        if "robot" in self.agents and self.config and self.config.ego_api:
+            robot = {"control": self._robot_owner(), "alerts": self._robot_alerts()}
         with self._lock:
             agents = {key: {"label": a.label, "available": self.unavailable_reason(key) is None,
                             "reason": self.unavailable_reason(key), "busy": a.busy, "sessionId": a.session_id}
                       for key, a in self.agents.items()}
             messages = [e.to_dict() for e in self._entries if e.id > since]
-        if "robot" in agents and self.config and self.config.ego_api:
-            agents["robot"]["control"] = self._robot_owner()
+        if robot:
+            agents["robot"].update(robot)
         return {"agents": agents, "messages": messages}
 
     def send(self, key: str, text: str) -> dict:
@@ -186,15 +204,60 @@ class HarnessChat:
             self._add(key, "system", f"已开始新的 {agent.label} 会话")
         return {"reset": True}
 
+    def cancel(self, key: str) -> dict:
+        """Stop the running turn of one harness; robot control is released when the turn ends."""
+        agent = self.agents.get(key)
+        if agent is None:
+            raise HttpError(400, f"unknown chat target {key!r}")
+        proc = agent.proc
+        if not agent.busy or proc is None or proc.poll() is not None:
+            return {"stopped": False}
+        _terminate(proc)
+        with self._lock:
+            self._add(key, "system", f"已停止 {agent.label} 的本轮任务")
+        if key == "robot" and self.config and self.config.ego_api:
+            try:
+                call("POST", f"{self.config.ego_api}/skill/stop", {})
+            except (HttpError, OSError) as exc:
+                self._report(agent, f"停止机器人动作失败：{exc}")
+        return {"stopped": True}
+
     def stop(self) -> None:
         for agent in self.agents.values():
             proc = agent.proc
             if proc is not None and proc.poll() is None:
-                proc.terminate()
+                _terminate(proc)
 
     # -------------------------------------------------------------- internals
     def _robot_control(self, action: str) -> None:
         call("POST", f"{self.config.ego_api}/ego/control", {"action": action, "owner": ROBOT_OWNER})
+
+    def _robot_alerts(self) -> list[dict]:
+        """Unacknowledged robot alerts; each new one is also added to the transcript as an error."""
+        try:
+            active = call("GET", f"{self.config.ego_api}/ego/alerts", timeout=0.5)["active"]
+        except (HttpError, OSError):  # the robot's Ego API is down; nothing to show
+            return []
+        with self._lock:
+            for alert in active:
+                if alert["id"] in self._seen_alerts:
+                    continue
+                self._seen_alerts.add(alert["id"])
+                source = {"agent": "机器人智能体", "skill": "技能执行", "runtime": "感知", "api": "Ego API",
+                          "harness": "Ego Harness"}.get(alert["source"], alert["source"])
+                self._add("robot", "error", f"⚠ 机器人遇到无法自行处理的情况（{source}）：{alert['message']}")
+        return active
+
+    def acknowledge_alerts(self) -> dict:
+        if not (self.config and self.config.ego_api):
+            raise HttpError(503, "the robot's Ego API is not known to this host")
+        return call("POST", f"{self.config.ego_api}/ego/alerts/ack", {})
+
+    def _robot_alert(self, message: str) -> None:
+        try:
+            call("POST", f"{self.config.ego_api}/ego/alert", {"message": message, "source": "harness", "level": "error"})
+        except (HttpError, OSError):  # the alert stays visible in the transcript as an error entry
+            pass
 
     def _robot_owner(self) -> str | None:
         try:
@@ -232,12 +295,13 @@ class HarnessChat:
                 controlled = True
             agent.cwd.mkdir(parents=True, exist_ok=True)
             proc = agent.proc = subprocess.Popen(args, cwd=agent.cwd, env=env, stdin=subprocess.PIPE,
-                                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                                 start_new_session=True)
             proc.stdin.write((agent.brief if first else agent.follow_up) + text)
             proc.stdin.close()
             err_reader = threading.Thread(target=lambda: stderr_tail.extend(proc.stderr), daemon=True)
             err_reader.start()
-            timer = threading.Timer(cfg.timeout_s, proc.kill)
+            timer = threading.Timer(cfg.timeout_s, lambda: _terminate(proc))
             timer.start()
             last_text: str | None = None
             for line in proc.stdout:
@@ -245,8 +309,11 @@ class HarnessChat:
             code = proc.wait()
             timer.cancel()
             err_reader.join(2)
-            if code != 0:
-                self._report(agent, f"{agent.label} 运行失败：{''.join(stderr_tail[-6:]).strip() or f'exit code {code}'}")
+            if code != 0 and code != -15:
+                detail = "".join(stderr_tail[-6:]).strip() or f"exit code {code}"
+                self._report(agent, f"{agent.label} 运行失败：{detail}")
+                if agent.on_failure is not None:
+                    agent.on_failure(f"{agent.label} 运行失败：{detail[-400:]}")
         except HttpError as exc:
             self._report(agent, f"无法接管机器人：{exc}")
         except OSError as exc:

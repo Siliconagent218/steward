@@ -6,6 +6,7 @@ telemetry). It never holds World State identifiers or ground truth.
 
 from __future__ import annotations
 
+import itertools
 import math
 import threading
 import time
@@ -62,8 +63,10 @@ class EgoRuntime:
         self.receipts: dict[str, dict] = {}
         self.last_error: str | None = None
         self.control_owner: str | None = None
+        self.alerts: list[dict] = []
+        self._alert_ids = itertools.count(1)
         self.executor = SkillExecutor(self.link.command, self._motion_state, self._mark_held, self.config.motion,
-                                      shift=self._shift_track)
+                                      shift=self._shift_track, on_error=lambda msg: self.alert(msg, "skill"))
 
     # --------------------------------------------------------------- lifecycle
     def start(self) -> None:
@@ -105,6 +108,9 @@ class EgoRuntime:
                 self.last_error = None
             except (HttpError, OSError) as exc:
                 self.last_error = f"robot port unavailable: {exc}"
+            except Exception as exc:  # noqa: BLE001 - perception must keep running; the operator is alerted
+                self.last_error = f"{type(exc).__name__}: {exc}"
+                self.alert(f"感知循环出现异常：{type(exc).__name__}: {exc}", "runtime")
             time.sleep(max(0.0, period - (time.monotonic() - t0)))
 
     # --------------------------------------------------------------- state
@@ -216,6 +222,34 @@ class EgoRuntime:
         if receipt_id not in self.receipts:
             raise KeyError(f"unknown receipt {receipt_id!r}")
         return self.receipts[receipt_id]
+
+    # ------------------------------------------------------------------ alerts
+    def alert(self, message: str, source: str, level: str = "error") -> dict:
+        """Record a situation the robot cannot resolve by itself (an unexpected exception, or a
+        problem its agent reports). A repeat of an unacknowledged message only bumps its count."""
+        with self._lock:
+            for existing in reversed(self.alerts):
+                if not existing["acknowledged"] and existing["message"] == message[:600]:
+                    existing["count"] += 1
+                    existing["t"] = round(self.estimator.stamp, 2)
+                    return existing
+            record = {"id": next(self._alert_ids), "t": round(self.estimator.stamp, 2), "level": level,
+                      "source": source, "message": message[:600], "count": 1, "acknowledged": False}
+            self.alerts.append(record)
+            del self.alerts[:-50]
+            return record
+
+    def alerts_view(self) -> dict:
+        with self._lock:
+            return {"alerts": [dict(a) for a in self.alerts],
+                    "active": [dict(a) for a in self.alerts if not a["acknowledged"]]}
+
+    def acknowledge(self, alert_id: int | None = None) -> dict:
+        with self._lock:
+            for record in self.alerts:
+                if alert_id is None or record["id"] == alert_id:
+                    record["acknowledged"] = True
+        return self.alerts_view()
 
     # ----------------------------------------------------------------- control
     def control(self) -> dict:

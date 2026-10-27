@@ -42,6 +42,7 @@ class MotionConfig:
     dock_yaw_tol: float = 0.12
     align_min: float = 0.01
     align_max: float = 0.15
+    stall_s: float = 2.0
 
 
 @dataclass
@@ -60,11 +61,28 @@ class Job:
                 "message": self.message, "started": self.started, "finished": self.finished, "log": self.log[-20:]}
 
 
+class _Stall:
+    """Detects a motion that stopped making progress: the error has not improved by ``step``
+    within ``window`` seconds of simulated (or wall) time."""
+
+    def __init__(self, t0: float, window: float, step: float):
+        self.window, self.step = window, step
+        self.best = math.inf
+        self.since = t0
+
+    def stuck(self, stamp: float, err: float) -> bool:
+        if err < self.best - self.step:
+            self.best, self.since = err, stamp
+        return stamp - self.since > self.window
+
+
 class SkillExecutor:
     """Runs at most one skill at a time in a worker thread."""
 
     def __init__(self, command: Callable[[dict], None], state: Callable[[], dict], mark_held: Callable[[str], None],
-                 config: MotionConfig | None = None, shift: Callable[[str, list[float]], None] | None = None):
+                 config: MotionConfig | None = None, shift: Callable[[str, list[float]], None] | None = None,
+                 on_error: Callable[[str], None] | None = None):
+        self._on_error = on_error
         self._command = command
         self._state = state
         self._mark_held = mark_held
@@ -132,6 +150,8 @@ class SkillExecutor:
             self._safe_retract()
         except Exception as exc:  # noqa: BLE001 - surfaced to the caller through the job record
             job.state, job.message = "failed", f"{type(exc).__name__}: {exc}"
+            if self._on_error is not None:
+                self._on_error(f"技能 {skill}（{job.id}）出现未预料的异常：{type(exc).__name__}: {exc}")
             self._safe_retract()
         finally:
             job.finished = self._state()["stamp"]
@@ -157,6 +177,7 @@ class SkillExecutor:
         duration = abs(delta) / self.config.angular_speed
         t0 = st["stamp"]
         deadline = t0 + duration * 3 + 5.0
+        stall = _Stall(t0, self.config.stall_s, 0.02)
         while True:
             st = self._tick()
             frac = 1.0 if duration == 0 else min(1.0, (st["stamp"] - t0) / duration)
@@ -164,6 +185,8 @@ class SkillExecutor:
             err = abs(wrap_angle(yaw_target - st["odometry"]["yaw"]))
             if frac >= 1.0 and err < self.config.yaw_tol:
                 return
+            if stall.stuck(st["stamp"], err):
+                raise SkillFailed(f"turn is blocked: no progress for {self.config.stall_s:.0f} s (yaw error {err:.2f} rad)")
             if st["stamp"] > deadline:
                 raise SkillFailed(f"turn did not converge (yaw error {err:.2f} rad)")
 
@@ -178,6 +201,7 @@ class SkillExecutor:
         duration = length / self.config.linear_speed
         t0 = st["stamp"]
         deadline = t0 + duration * 3 + 5.0
+        stall = _Stall(t0, self.config.stall_s, 0.01)
         while True:
             st = self._tick()
             frac = 1.0 if duration == 0 else min(1.0, (st["stamp"] - t0) / duration)
@@ -185,6 +209,8 @@ class SkillExecutor:
             err = math.hypot(x1 - st["odometry"]["x"], y1 - st["odometry"]["y"])
             if frac >= 1.0 and err < self.config.position_tol:
                 return
+            if stall.stuck(st["stamp"], err):
+                raise SkillFailed(f"base is blocked: no progress for {self.config.stall_s:.0f} s ({err:.2f} m from the waypoint)")
             if st["stamp"] > deadline:
                 raise SkillFailed(f"base did not reach the waypoint (error {err:.2f} m)")
 
@@ -302,7 +328,10 @@ class SkillExecutor:
         if plan.get("support") != "floor":
             # Objects taken from the floor are large; the arm stays out so they clear the base.
             self._set_joint("reach", self.config.retract_reach)
-        self._backoff(plan)
+        if "retreat" in plan:
+            self._translate_to(plan["retreat"][0], plan["retreat"][1], plan["yaw"])
+        else:
+            self._backoff(plan)
         job.message = f"holding {plan['target']}"
 
     def _place(self, job: Job, plan: dict) -> None:

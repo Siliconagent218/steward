@@ -15,7 +15,7 @@ from steward.ego.estimator import EgoEstimator
 from steward.ego.planner import Box2D, protrusion
 from steward.ego.runtime import EgoRuntime, RobotLink
 from steward.ego.server import ego_api
-from steward.mission import _explore
+from steward.mission import _approach_to_observe, _explore
 from steward.world.chores_check import check_sideboard, check_swap, check_table, drawer_contents
 from steward.world.console import console_state
 from steward.world.server import StewardHost
@@ -150,6 +150,55 @@ def test_a_chair_is_carried_and_put_down_on_the_floor(kitchen_root, tmp_path):
         api.stop()
         runtime.stop()
         host.stop()
+
+
+def test_picking_a_chair_by_the_wall_leaves_room_to_move_and_it_can_be_put_down_in_place(kitchen_root, tmp_path):
+    from steward.net import call
+
+    host = StewardHost(kitchen_root, scenario="phase0-chores", speed=6.0, seed=3, run_dir=tmp_path).start()
+    record = AuthoringService(kitchen_root).library.get("chair")
+    host.sim.edit_spawn("w:chair-2", record["template"], {"at": {"x": 1.5, "y": -0.9, "yaw": math.pi}}, {"id": "chair"})
+    runtime = EgoRuntime(RobotLink(host.robot_servers["w:robot-1"].url), steward_bot().to_dict())
+    runtime.start()
+    api = ego_api(runtime).start()
+
+    def predict(skill: str, params: dict) -> dict:
+        return call("POST", f"{api.url}/ego/predict", {"skill": skill, "params": params})
+
+    def run(receipt: dict) -> dict:
+        job = call("POST", f"{api.url}/skill/run", {"receipt": receipt["id"]})
+        return call("POST", f"{api.url}/skill/wait", {"job": job["id"], "timeoutS": 120}, timeout=130)
+
+    try:
+        _explore(api.url, 120)
+        chair = next(o for o in call("GET", f"{api.url}/ego/summary")["objects"] if o["category"] == "chair")
+        _approach_to_observe(api.url, chair)
+        receipt = predict("pick", {"target": chair["id"]})
+        assert receipt["withinRiskLimit"], receipt["issues"]
+        assert receipt["plan"]["dock"][0] < 2.2, "the side between the chair and the east wall would box the robot in"
+        job = run(receipt)
+        assert job["state"] == "succeeded", (job["message"], job["log"])
+        assert predict("navigate", {"x": -0.5, "y": 0.6})["withinRiskLimit"], "the robot can still move with the chair"
+        held = next(o for o in call("GET", f"{api.url}/ego/summary")["objects"] if o["id"] == chair["id"])
+        here = predict("place", {"at": held["position"][:2]})
+        assert here["withinRiskLimit"] and here["plan"]["pathLength"] == 0.0, here["issues"]
+        before = host.sim._entity_pose("w:chair-2")["p"]
+        assert run(here)["state"] == "succeeded"
+        after = host.sim._entity_pose("w:chair-2")["p"]
+        assert math.dist(before[:2], after[:2]) < 0.04 and after[2] == pytest.approx(0.0, abs=0.01)
+    finally:
+        api.stop()
+        runtime.stop()
+        host.stop()
+
+
+def test_a_stalled_motion_is_detected_within_the_window():
+    from steward.ego.skills import _Stall
+
+    stall = _Stall(0.0, 2.0, 0.01)
+    assert not any(stall.stuck(t * 0.1, 1.0 - 0.05 * t) for t in range(15))
+    assert not stall.stuck(3.0, 0.3)
+    assert stall.stuck(5.1, 0.3)
 
 
 def test_one_chores_round_is_confirmed_by_world_state(kitchen_root, tmp_path):

@@ -91,6 +91,10 @@ export class EgoRuntimeClient extends EgoService {
   stop(signal?: AbortSignal): Promise<JsonObject> {
     return this.call('POST', '/skill/stop', {}, signal)
   }
+
+  reportProblem(message: string, signal?: AbortSignal): Promise<JsonObject> {
+    return this.call('POST', '/ego/alert', { message, source: 'agent', level: 'blocked' }, signal)
+  }
 }
 
 export default EgoRuntimeClient

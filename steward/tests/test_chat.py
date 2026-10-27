@@ -95,6 +95,38 @@ def test_robot_chat_takes_control_for_the_turn_and_gives_it_back(tmp_path):
     assert [m["agent"] for m in chat.state()["messages"]] == ["robot"] * 3
 
 
+def test_stopping_a_robot_turn_ends_the_run_and_releases_control(tmp_path):
+    robot = _home(tmp_path, "robot-1", "ego")
+    script = tmp_path / "dsh"
+    script.write_text("#!/bin/sh\ncat > /dev/null\necho '{\"type\": \"session\", \"sessionId\": \"s-1\"}'\nsleep 30\n")
+    script.chmod(0o755)
+    calls = []
+
+    def control(q, b):
+        calls.append(b["action"])
+        return {"owner": None}
+
+    ego = JsonServer({("POST", "/ego/control"): control, ("GET", "/ego/control"): lambda q, b: {"owner": None},
+                      ("POST", "/skill/stop"): lambda q, b: calls.append("stop") or {"stopped": None}}).start()
+    try:
+        chat = HarnessChat(ChatConfig(dsh=script, cwd=tmp_path, env_file=tmp_path / ".env", robot_home=robot,
+                                      ego_api=ego.url), lambda: "unused")
+        chat.send("robot", "去拿椅子")
+        deadline = time.time() + 5
+        while chat.agents["robot"].session_id is None and time.time() < deadline:
+            time.sleep(0.02)
+        started = time.time()
+        assert chat.cancel("robot") == {"stopped": True}
+        _wait_idle(chat, "robot")
+        assert time.time() - started < 5
+    finally:
+        ego.stop()
+    assert calls == ["acquire", "stop", "release"]
+    roles = [m["role"] for m in chat.state()["messages"]]
+    assert "system" in roles and "error" not in roles
+    assert chat.cancel("robot") == {"stopped": False}
+
+
 def test_shuttle_pauses_while_an_operator_controls_the_robot():
     from steward.mission import _wait_for_control
 

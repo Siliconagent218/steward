@@ -11,15 +11,26 @@ from steward.net import HttpError, JsonServer
 
 
 def ego_api(runtime: EgoRuntime, port: int = 0) -> JsonServer:
-    def guarded(fn):
+    def guarded(route, fn):
         def wrapped(q, b):
             try:
                 return fn(q, b or {})
+            except HttpError:
+                raise
             except KeyError as exc:
                 raise HttpError(404, str(exc).strip("'")) from None
             except (PermissionError, RuntimeError, ValueError) as exc:
                 raise HttpError(409, str(exc)) from None
+            except Exception as exc:  # noqa: BLE001 - reported to the operator, then to the caller as 500
+                runtime.alert(f"Ego API {route[0]} {route[1]} 出现异常：{type(exc).__name__}: {exc}", "api")
+                raise HttpError(500, f"{type(exc).__name__}: {exc}") from None
         return wrapped
+
+    def report(b):
+        message = str(b.get("message", "")).strip()
+        if not message:
+            raise ValueError("an alert needs a message")
+        return runtime.alert(message, str(b.get("source", "agent")), str(b.get("level", "blocked")))
 
     def control(b):
         if b.get("action") == "acquire":
@@ -36,6 +47,9 @@ def ego_api(runtime: EgoRuntime, port: int = 0) -> JsonServer:
         ("POST", "/ego/observe"): lambda q, b: runtime.observe(),
         ("POST", "/ego/explore"): lambda q, b: runtime.explore(b.get("owner")),
         ("GET", "/ego/control"): lambda q, b: runtime.control(),
+        ("GET", "/ego/alerts"): lambda q, b: runtime.alerts_view(),
+        ("POST", "/ego/alert"): lambda q, b: report(b),
+        ("POST", "/ego/alerts/ack"): lambda q, b: runtime.acknowledge(b.get("id")),
         ("POST", "/ego/control"): lambda q, b: control(b),
         ("POST", "/ego/predict"): lambda q, b: runtime.predict(b["skill"], b.get("params", {})),
         ("GET", "/ego/receipt"): lambda q, b: runtime.receipt(q["id"]),
@@ -44,4 +58,4 @@ def ego_api(runtime: EgoRuntime, port: int = 0) -> JsonServer:
         ("POST", "/skill/wait"): lambda q, b: runtime.wait(b["job"], float(b.get("timeoutS", 120))),
         ("POST", "/skill/stop"): lambda q, b: runtime.stop_motion(),
     }
-    return JsonServer({k: guarded(v) for k, v in routes.items()}, port=port, name="ego-api")
+    return JsonServer({k: guarded(k, v) for k, v in routes.items()}, port=port, name="ego-api")

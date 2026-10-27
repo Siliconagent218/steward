@@ -52,10 +52,15 @@ class EsimConfig:
     nest_fit: float = 0.92
     floor_carry_lift: float = 0.05
     floor_release_gap: float = 0.015
+    carry_retreat_max: float = 1.2
 
 
 class PredictionError(ValueError):
     pass
+
+
+def _wrap(a: float) -> float:
+    return (a + math.pi) % (2 * math.pi) - math.pi
 
 
 class Esim:
@@ -147,8 +152,12 @@ class Esim:
 
     # -------------------------------------------------------------- approach
     def _approach(self, es: SceneState, support: Entity, target_xy: tuple[float, float], height: float,
-                  exclude: set[str]) -> dict:
-        """Choose the support side to dock at; return path, dock pose and reach, or raise."""
+                  exclude: set[str], load: Entity | None = None) -> dict:
+        """Choose the support side to dock at; return path, dock pose and reach, or raise.
+
+        With ``load`` (a floor-standing object about to be picked) a side is only accepted when the
+        robot can still turn at the pre-dock pose while carrying the load in front of it, so a
+        pick never leaves the robot boxed in."""
         sbox, _, _ = entity_box(support)
         rx, ry, _ = self._robot_xy_yaw(es)
         c, s = math.cos(sbox.yaw), math.sin(sbox.yaw)
@@ -158,6 +167,10 @@ class Esim:
                       ((tx, sbox.hy), (0.0, 1.0), sbox.hy - ty), ((tx, -sbox.hy), (0.0, -1.0), sbox.hy + ty)]
         cfg = self.config
         obstacles_all = floor_obstacles(es, exclude)
+        # A floor-standing load stays an obstacle for the path to it (only its own back-out ignores it).
+        loaded = floor_obstacles(es, exclude - {load.id}) if load is not None else None
+        if loaded is not None:
+            obstacles_all, load_free = loaded, obstacles_all
         carry = self._carry(es)
         grid = build_grid(obstacles_all, self._sweep(carry) + cfg.nav_margin, [(rx, ry), target_xy])
         best, reasons = None, []
@@ -182,6 +195,19 @@ class Esim:
             if blocked:
                 reasons.append(f"side {normal}: no room to turn at the pre-dock pose ({blocked})")
                 continue
+            retreat = None
+            if load is not None:
+                lbox, _, _ = entity_box(load)
+                # The load already stands where it is: check the back-out with its physical size (the ES
+                # box carries a 2-sigma margin) less a small tolerance for sliding past a neighbour.
+                shrink = self._sigma_xy(load) + 0.02
+                after = (self.tool_offset + reach, 0.0, lbox.yaw - yaw, max(lbox.hx - shrink, 0.05),
+                         max(lbox.hy - shrink, 0.05))
+                retreat = self._retreat(load_free, dock, (nx, ny), yaw, after, cfg.predock_backoff)
+                if retreat is None:
+                    reasons.append(f"side {normal}: carrying {load.id} from here the robot could not back out to "
+                                   "a spot with room to turn")
+                    continue
             path = astar(grid, (rx, ry), predock)
             if path is None:
                 reasons.append(f"side {normal}: no collision-free path to the pre-dock pose")
@@ -191,8 +217,11 @@ class Esim:
                 best = {"path": [list(p) for p in path], "predock": list(predock), "dock": list(dock), "yaw": yaw,
                         "reach": reach, "pathLength": length,
                         "clearance": path_clearance(path, obstacles_all) if len(path) > 1 else math.inf}
+                if retreat is not None:
+                    best["retreat"] = list(retreat)
         if best is None:
-            raise PredictionError("no feasible approach: " + "; ".join(reasons))
+            hint = self._boxed_in(es, obstacles_all, carry)
+            raise PredictionError("no feasible approach: " + "; ".join(reasons) + (f"; {hint}" if hint else ""))
         return best
 
     def _turn_blocked(self, obstacles: list[Box2D], xy: tuple[float, float], radius: float | None = None) -> str | None:
@@ -232,6 +261,35 @@ class Esim:
         if held is None or entity_box(held)[1] >= self.config.floor_furniture_height:
             return None
         return self._held_relative(es)
+
+    def _retreat(self, obstacles: list[Box2D], start: tuple[float, float], direction: tuple[float, float],
+                 yaw: float, carry: tuple, min_d: float) -> tuple[float, float] | None:
+        """Nearest point at least ``min_d`` along ``direction`` (heading unchanged) that the robot can
+        reach in a straight line with its load and where it has room to turn with it."""
+        sweep = self._sweep(carry)
+        d = 0.0
+        while d <= self.config.carry_retreat_max + 1e-9:
+            xy = (start[0] + direction[0] * d, start[1] + direction[1] * d)
+            if self._footprint_blocked(obstacles, xy, yaw, carry):
+                return None
+            if d >= min_d and self._turn_blocked(obstacles, xy, sweep) is None:
+                return xy
+            d += 0.05
+        return None
+
+    def _boxed_in(self, es: SceneState, obstacles: list[Box2D], carry: tuple | None) -> str | None:
+        """When a carried load leaves no room to turn where the robot stands, say how to get out:
+        put the load down where it is."""
+        if carry is None:
+            return None
+        rx, ry, ryaw = self._robot_xy_yaw(es)
+        blocked = self._turn_blocked(obstacles, (rx, ry), self._sweep(carry))
+        if blocked is None:
+            return None
+        held = self._held(es)
+        box, _, _ = entity_box(held)
+        return (f"carrying {held.id} the robot has no room to turn here ({blocked}); put it down where it is with "
+                f"place at=[{box.cx:.2f}, {box.cy:.2f}] yaw={box.yaw:.2f}, then move without it")
 
     @staticmethod
     def _carried_box(carry: tuple, xy: tuple[float, float], yaw: float) -> Box2D:
@@ -277,7 +335,8 @@ class Esim:
             raise PredictionError(f"goal pose collides with {blocked}")
         path = astar(grid, (rx, ry), goal)
         if path is None:
-            raise PredictionError("no collision-free path to the goal")
+            hint = self._boxed_in(es, obstacles, carry)
+            raise PredictionError("no collision-free path to the goal" + (f"; {hint}" if hint else ""))
         clearance = path_clearance(path, obstacles) if len(path) > 1 else math.inf
         issues, risk = [], 0.02
         if clearance < self._sweep(carry) + 0.05:
@@ -304,7 +363,7 @@ class Esim:
             raise PredictionError(f"{target.id} holds {', '.join(e.id for e in self._contents(es, target))}; "
                                   "take those out first")
         anchor = target if on_floor else self._anchor(es, support)
-        approach = self._approach(es, anchor, (tp[0], tp[1]), tp[2], {target.id})
+        approach = self._approach(es, anchor, (tp[0], tp[1]), tp[2], {target.id}, load=target if on_floor else None)
         sigma = math.hypot(self._sigma_xy(target), self._sigma_xy(self._self(es)))
         r = self.config.capture_radius
         p_miss = math.exp(-(r * r) / (2 * sigma * sigma)) if sigma > 0 else 0.0
@@ -394,20 +453,27 @@ class Esim:
         if not (cfg.lift_min <= lift <= cfg.lift_max):
             raise PredictionError(f"lowering {held.id} to the floor needs lift {lift:.2f} m, outside the lift range")
         obstacles = floor_obstacles(es, {held.id})
+        held_box, _, _ = entity_box(held)
+        here_yaw = held_box.yaw if "yaw" not in params else float(params["yaw"])
+        if math.hypot(tx - held_box.cx, ty - held_box.cy) <= 0.05 and abs(_wrap(here_yaw - held_box.yaw)) <= 0.1:
+            # Put it down where it is: no motion, so no path or turning room is needed.
+            plan = {"path": [[rx, ry]], "predock": [rx, ry], "dock": [rx, ry], "yaw": ryaw, "lift": lift,
+                    "object": held.id, "floor": [held_box.cx, held_box.cy], "pathLength": 0.0}
+            return self._receipt(es, "place", params, 0.02, [], plan)
         sweep = self._sweep(rel)
         grid = build_grid(obstacles, sweep + cfg.nav_margin, [(rx, ry), (tx, ty)])
         reasons = []
         for h in headings:
             c, s = math.cos(h), math.sin(h)
             dock = (tx - (c * lx - s * ly), ty - (s * lx + c * ly))
-            predock = (dock[0] - c * cfg.predock_backoff, dock[1] - s * cfg.predock_backoff)
             blocked = self._footprint_blocked(obstacles, dock, h, rel)
             if blocked:
                 reasons.append(f"heading {math.degrees(h):.0f} deg: {held.id} or the robot would hit {blocked}")
                 continue
-            blocked = self._turn_blocked(obstacles, predock, sweep)
-            if blocked:
-                reasons.append(f"heading {math.degrees(h):.0f} deg: no room to turn with {held.id} ({blocked})")
+            predock = self._retreat(obstacles, dock, (-c, -s), h, rel, cfg.predock_backoff)
+            if predock is None:
+                reasons.append(f"heading {math.degrees(h):.0f} deg: no straight approach with room to turn while "
+                               f"carrying {held.id}")
                 continue
             path = astar(grid, (rx, ry), predock)
             if path is None:
@@ -416,7 +482,9 @@ class Esim:
             plan = {"path": [list(q) for q in path], "predock": list(predock), "dock": list(dock), "yaw": h,
                     "lift": lift, "object": held.id, "floor": [tx, ty], "pathLength": path_length(path)}
             return self._receipt(es, "place", params, 0.03, [], plan)
-        raise PredictionError(f"cannot put {held.id} down at ({tx:.2f}, {ty:.2f}): " + "; ".join(reasons[:4]))
+        hint = self._boxed_in(es, obstacles, rel)
+        raise PredictionError(f"cannot put {held.id} down at ({tx:.2f}, {ty:.2f}): " + "; ".join(reasons[:4])
+                              + (f"; {hint}" if hint else ""))
 
     def _nest_spot(self, es: SceneState, bowl: Entity, held: Entity, held_half: float):
         """Nest a stackable object in the centre of a larger receptacle that holds nothing yet."""

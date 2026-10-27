@@ -243,6 +243,8 @@ class StewardHost:
             ("GET", "/console/chat"): guard(lambda q, b: self.chat.state(int(q.get("since", 0)))),
             ("POST", "/console/chat"): guard(lambda q, b: self.chat.send(b.get("agent", "world"), b.get("message", ""))),
             ("POST", "/console/chat/reset"): guard(lambda q, b: self.chat.reset(b.get("agent", "world"))),
+            ("POST", "/console/chat/stop"): guard(lambda q, b: self.chat.cancel(b.get("agent", "world"))),
+            ("POST", "/console/alerts/ack"): guard(lambda q, b: self.chat.acknowledge_alerts()),
         }
 
     # -------------------------------------------------------------- edits

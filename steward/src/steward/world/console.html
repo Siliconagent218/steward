@@ -81,6 +81,15 @@
   .composer textarea:focus { outline: none; border-color: #3c4652; }
   .composer button { height: 58px; }
   button:disabled { opacity: .5; cursor: default; }
+  .alert-overlay { position: absolute; inset: 0; display: flex; align-items: flex-start; justify-content: center;
+                   padding: 14px; pointer-events: none; animation: alertPulse 1.1s ease-in-out infinite; }
+  .alert-overlay[hidden] { display: none; }
+  @keyframes alertPulse { 0%, 100% { background: rgba(225, 30, 30, 0.45); } 50% { background: rgba(225, 30, 30, 0.06); } }
+  .alert-box { pointer-events: auto; max-width: 92%; background: #2a0f12f0; border: 1px solid #ff6b6b; color: #ffd6d6;
+               border-radius: 8px; padding: 10px 12px; font-size: 13px; white-space: pre-wrap; }
+  .alert-box b { color: #ff8a8a; display: block; margin-bottom: 4px; }
+  .alert-box button { margin-top: 8px; border-color: #ff6b6b; }
+  .viewport.alerting { outline: 3px solid #ff4d4d; outline-offset: -3px; }
 </style>
 </head>
 <body>
@@ -132,6 +141,10 @@
           <img id="imgEgo" alt="Ego State">
           <canvas id="ovEgo" width="1024" height="768"></canvas>
           <div class="empty" id="egoEmpty">尚未收到机器人的自我态</div>
+          <div class="alert-overlay" id="egoAlert" hidden>
+            <div class="alert-box"><b>⚠ 机器人遇到无法自行处理的情况</b><span id="egoAlertText"></span>
+              <div><button id="egoAlertAck">知道了</button></div></div>
+          </div>
           <div class="hint">拖动旋转 · 滚轮缩放</div>
         </div>
       </div>
@@ -145,7 +158,7 @@
   </section>
   <section class="card chat">
     <h2>操作员对话 <span class="pill" id="chatStatus"></span>
-      <span class="spacer"></span><button id="chatReset">新会话</button></h2>
+      <span class="spacer"></span><button id="chatStop" title="停止当前目标的本轮任务">停止</button><button id="chatReset">新会话</button></h2>
     <div class="targets">
       <button data-target="world" class="on world">世界 · World Harness</button>
       <button data-target="robot" class="robot">机器人 · robot-1</button>
@@ -523,11 +536,25 @@ function renderStatus() {
   $('chatStatus').textContent = (!a.available ? '不可用' : a.busy ? '处理中' : a.sessionId ? '会话进行中' : '新会话') + control;
   $('chatStatus').title = a.reason || a.sessionId || '';
   $('chatSend').disabled = a.busy || !a.available;
+  $('chatStop').disabled = !a.busy;
   $('chatReset').title = `开始新的 ${a.label} 会话`;
+}
+const ALERT_SOURCES = { agent: '机器人智能体报告', skill: '技能执行异常', runtime: '感知异常', api: 'Ego API 异常',
+  harness: 'Ego Harness 运行失败' };
+function renderAlerts(alerts) {
+  const box = $('egoAlert');
+  $('vpEgo').classList.toggle('alerting', alerts.length > 0);
+  if (!alerts.length) { box.hidden = true; return; }
+  const last = alerts[alerts.length - 1];
+  const more = alerts.length > 1 ? `（另有 ${alerts.length - 1} 条未确认）` : '';
+  $('egoAlertText').textContent = `${ALERT_SOURCES[last.source] || last.source}：${last.message}`
+    + `${last.count > 1 ? ` ×${last.count}` : ''}${more}`;
+  box.hidden = false;
 }
 async function refreshChat() {
   try {
     chatState = await api('GET', '/console/chat');
+    renderAlerts((chatState.agents.robot && chatState.agents.robot.alerts) || []);
     renderStatus();
     const sig = JSON.stringify([chatTarget, Object.values(chatState.agents).map(a => a.busy), chatState.messages]);
     if (sig !== chatSig) { chatSig = sig; renderChat(chatState); }
@@ -550,6 +577,8 @@ $('chatInput').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendChat(); }
 });
 document.querySelectorAll('[data-target]').forEach(b => b.onclick = () => { chatTarget = b.dataset.target; chatSig = ''; renderTarget(); refreshChat(); });
+$('egoAlertAck').onclick = async () => { try { await api('POST', '/console/alerts/ack'); refreshChat(); } catch (e) { showError(e); } };
+$('chatStop').onclick = async () => { try { await api('POST', '/console/chat/stop', { agent: chatTarget }); refreshChat(); } catch (e) { showError(e); } };
 $('chatReset').onclick = async () => { try { await api('POST', '/console/chat/reset', { agent: chatTarget }); refreshChat(); } catch (e) { showError(e); } };
 renderTarget();
 

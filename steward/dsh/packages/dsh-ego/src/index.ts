@@ -156,4 +156,13 @@ export abstract class EgoService extends Service {
    * @returns the id of the interrupted job, if any.
    */
   abstract stop(signal?: AbortSignal): Promise<JsonObject>
+
+  /**
+   * Tell the operator about a situation the robot cannot resolve by itself; the Steward console
+   * shows it as an alert until the operator acknowledges it.
+   * @param message - what went wrong and what the robot needs.
+   * @param signal - caller cancellation.
+   * @returns the recorded alert.
+   */
+  abstract reportProblem(message: string, signal?: AbortSignal): Promise<JsonObject>
 }
