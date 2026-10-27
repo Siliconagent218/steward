@@ -360,3 +360,21 @@ def test_a_plate_lying_on_the_floor_blocks_but_is_not_offered_as_movable():
     esim._blockers = {"e:1", "e:2"}
     blockers = {b["id"]: b for b in esim._describe_blockers(est.to_scene())}
     assert blockers["e:1"]["movable"] and not blockers["e:2"]["movable"] and blockers["e:2"]["parkAt"] == []
+
+
+def test_a_role_nothing_resembles_is_searched_for_before_any_guess(monkeypatch):
+    import steward.chores as chores_mod
+
+    table = {"id": "e:51", "category": "table", "role": "table", "roleConfidence": 0.84, "existence": 1.0,
+             "categories": {"table": 0.84}, "position": [0.9, -1.8, 0.39], "color": None}
+    cabinet = {"id": "e:10", "category": "cabinet", "role": "cabinet", "roleConfidence": 0.85, "existence": 1.0,
+               "categories": {"cabinet": 0.8, "table": 0.1}, "position": [2.7, 0.6, 0.41], "color": None}
+    views = iter([{"objects": [cabinet]}, {"objects": [cabinet, table]}, {"objects": [cabinet, table]}])
+    searched, looked = [], []
+    monkeypatch.setattr(chores_mod, "_summary", lambda api: next(views))
+    monkeypatch.setattr(chores_mod, "_approach_to_observe", lambda api, obj, distance=1.1: looked.append(obj["id"]))
+    runner = Chores("http://unused")
+    monkeypatch.setattr(runner, "publish", lambda **changes: None)
+    monkeypatch.setattr(runner, "_search", lambda role: searched.append(role))
+    assert runner._confirmed("table")["id"] == "e:51"
+    assert searched == ["table"] and looked == [], "a cabinet that is 10 % table-like is not approached as the table"

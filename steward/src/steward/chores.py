@@ -229,12 +229,18 @@ class Chores:
         role is doubtful the robot looks at it from closer, and when no object has the role it looks
         at the likeliest candidate, instead of failing on a confused category."""
         zh = CATEGORY_ZH.get(role, role)
+        searched = False
         for attempt in range(CONFIRM_TRIES + 1):
             s = _summary(self.api)
             found = _objects(s, role)
             last = attempt == CONFIRM_TRIES
             if not found:
                 candidates = [o for o in s["objects"] if o["existence"] >= 0.5 and o["categories"].get(role, 0.0) >= CANDIDATE_MIN]
+                if not candidates and not searched:
+                    # Nothing looks like it: it has not been seen yet, so look for it before guessing.
+                    searched = True
+                    self._search(role)
+                    continue
                 if not candidates or last:
                     raise MissionFailed(f"no {role} in the ego state")
                 cand = max(candidates, key=lambda o: o["categories"][role])
@@ -251,6 +257,21 @@ class Chores:
             _approach_to_observe(self.api, obj, distance=CONFIRM_DISTANCE)
             time.sleep(1.5)
         raise MissionFailed(f"no {role} in the ego state")
+
+    def _search(self, role: str) -> None:
+        """Tour the room's viewpoints, looking around at each, until some object takes ``role``."""
+        zh = CATEGORY_ZH.get(role, role)
+        for x, y in self._viewpoints():
+            self._doing(f"寻找{zh}：还没有看到像{zh}的物体，到 ({x:.1f}, {y:.1f}) 环顾一周")
+            receipt = call("POST", f"{self.api}/ego/predict", {"skill": "navigate", "params": {"x": x, "y": y}})
+            if receipt["withinRiskLimit"]:
+                try:
+                    _run(self.api, receipt, self.timeout_s)
+                except MissionFailed as exc:
+                    self.log.append({"step": "search-move-failed", "error": str(exc)})
+            _explore(self.api, self.timeout_s)
+            if _objects(_summary(self.api), role):
+                return
 
     def _step(self, phase: str, text: str, **extra) -> None:
         record = {"phase": phase, "text": text, **extra}
@@ -492,7 +513,8 @@ UNSTICK_M = 0.35
 CONFIRM_CONFIDENCE = 0.6  # a role less sure than this is checked from closer before acting on it
 CONFIRM_TRIES = 2
 CONFIRM_DISTANCE = 1.3
-CANDIDATE_MIN = 0.1  # least probability of the wanted category for an object worth a closer look
+CANDIDATE_MIN = 0.3  # least probability of the wanted category for an object worth a closer look;
+# below it the object has more likely not been seen yet and the room is searched instead
 FAILURE_HISTORY = 8
 PERCEPTION_FAILURES = ("ego state", "no drawer seen", "not seen", "lost")
 LIVELOCK_REPEATS = 2
