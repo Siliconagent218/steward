@@ -62,7 +62,8 @@ class EgoRuntime:
         self.receipts: dict[str, dict] = {}
         self.last_error: str | None = None
         self.control_owner: str | None = None
-        self.executor = SkillExecutor(self.link.command, self._motion_state, self._mark_held, self.config.motion)
+        self.executor = SkillExecutor(self.link.command, self._motion_state, self._mark_held, self.config.motion,
+                                      shift=self._shift_track)
 
     # --------------------------------------------------------------- lifecycle
     def start(self) -> None:
@@ -122,6 +123,10 @@ class EgoRuntime:
         with self._lock:
             self.estimator.mark_held(track_id)
 
+    def _shift_track(self, track_id: str, delta: list[float]) -> None:
+        with self._lock:
+            self.estimator.shift(track_id, delta)
+
     # ------------------------------------------------------------- Ego API
     def summary(self) -> dict:
         es = self.ego_state()
@@ -148,6 +153,9 @@ class EgoRuntime:
                 "existence": ent.existence,
                 "lastSeenAgoS": round(es.stamp - (ent.pose.t or es.stamp), 2),
                 "affordances": [a.value for a in ent.rigid.links[0].affordances],
+                "color": ent.state_vars["color"].value if "color" in ent.state_vars else None,
+                "extentM": self._extent(ent.id),
+                **({"openingM": round(self._opening(ent.id), 3)} if ent.category.value == "drawer" else {}),
             })
         job = self.executor.current.to_dict() if self.executor.current else None
         return {
@@ -160,6 +168,17 @@ class EgoRuntime:
             "currentSkill": job,
             "runtimeError": self.last_error,
         }
+
+    def _extent(self, track_id: str) -> list[float] | None:
+        """Estimated physical size of a track, without the uncertainty margin added to ``sizeM``."""
+        with self._lock:
+            track = self.estimator.tracks.get(track_id)
+            return [round(float(v), 3) for v in track.size] if track is not None else None
+
+    def _opening(self, track_id: str) -> float:
+        with self._lock:
+            track = self.estimator.tracks.get(track_id)
+            return self.estimator.drawer_opening(track) if track is not None else 0.0
 
     def query(self, category: str | None = None, near: str | None = None, radius: float | None = None) -> list[dict]:
         objs = self.summary()["objects"]

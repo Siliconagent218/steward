@@ -174,9 +174,12 @@
 <script>
 const $ = (id) => document.getElementById(id);
 const COLORS = { table: '#c9a46b', counter: '#8a6a4a', cabinet: '#a07850', sideboard: '#b08860', cup: '#7fd3ff',
-  bowl: '#e8e8ea', plate: '#f2f2f2', 'steward-bot': '#4aa3ff', wall: '#5b6570', floor: '#1c2128' };
+  bowl: '#e8e8ea', plate: '#f2f2f2', 'steward-bot': '#4aa3ff', wall: '#5b6570', floor: '#1c2128', drawer: '#ccab80',
+  wine_glass: '#cfeaf7', mug: '#2a2a2e', teddy_bear: '#94613a', scissors: '#b5b8bf' };
 const NAMES = { table: '餐桌', counter: '操作台', cabinet: '柜子', sideboard: '餐边柜', cup: '杯子', bowl: '碗',
-  plate: '盘子', 'steward-bot': '机器人' };
+  plate: '盘子', 'steward-bot': '机器人', drawer: '抽屉', wine_glass: '高脚杯', mug: '咖啡杯', teddy_bear: '玩具熊',
+  scissors: '剪刀' };
+const COLOR_NAMES = { red: '红', green: '绿', blue: '蓝', black: '黑', clear: '透明' };
 const RENDER_W = 1024, RENDER_H = 768;
 let state = null, robotId = null, view = null, viewKey = '';
 const panes = {
@@ -259,7 +262,8 @@ function drawEgoOverlay() {
     }
     if ($('showEgoLabels').checked) {
       const conf = o.existence < 0.99 ? `  存在 ${(o.existence * 100).toFixed(0)}%` : '';
-      p.text([o.center[0], o.center[1], o.center[2] + o.size[2] / 2 + 0.1], `${label(o.category, o.id)}${conf}`, '#ffd2a6');
+      const tint = o.color && COLOR_NAMES[o.color] && o.category === 'bowl' ? COLOR_NAMES[o.color] : '';
+      p.text([o.center[0], o.center[1], o.center[2] + o.size[2] / 2 + 0.1], `${tint}${label(o.category, o.id)}${conf}`, '#ffd2a6');
     }
   }
   if ($('showError').checked) {
@@ -410,7 +414,8 @@ function drawMetrics() {
   ctx.stroke();
 }
 function drawEvents() {
-  const names = { 'grasp/attach': '抓取', 'grasp/release': '放下', 'grasp/miss': '抓空', 'episode/reset': 'Episode 重置' };
+  const names = { 'grasp/attach': '抓取', 'grasp/release': '放下', 'grasp/miss': '抓空', 'episode/reset': 'Episode 重置',
+    'grasp/handle': '握住抽屉把手', 'grasp/handle-release': '松开抽屉把手' };
   const edits = { move: '世界修改·移动', spawn: '世界修改·新增', remove: '世界修改·删除' };
   $('events').innerHTML = state.events.slice().reverse().map(e =>
     `<li>t=${e.t.toFixed(1)} s　${(e.type === 'world/edit' && edits[e.action]) || names[e.type] || e.type}${e.entity ? '　' + e.entity : ''}${e.robot ? '（' + e.robot + '）' : ''}</li>`
@@ -424,10 +429,10 @@ const TOOL_NAMES = { world_edit: '修改世界', world_scene: '读取世界状�
   ego_predict: '预测（ESim）', skill_run: '执行技能', skill_status: '技能状态', body_stop: '停止' };
 const TARGETS = {
   world: { name: '世界', placeholder: '描述要对世界做的修改（World Harness 执行），Enter 发送，Shift+Enter 换行',
-    chips: ['把杯子挪到餐边柜上', '在餐桌上再放一个碗', '把盘子拿走', '把餐桌往东挪 30 厘米'],
+    chips: ['把黑色咖啡杯挪到操作台上', '在餐桌上再放一个碗', '把剪刀拿走', '把餐桌往东挪 30 厘米'],
     empty: '描述要修改的物体或位置；World Harness 会读取世界状态并调用 world_edit 执行，机器人需要自己发现变化。' },
   robot: { name: '机器人', placeholder: '给 robot-1 下达新任务（Ego Harness 执行），Enter 发送，Shift+Enter 换行',
-    chips: ['看看周围有什么', '把杯子放到餐桌上', '把碗拿到操作台上', '停下来，原地待命'],
+    chips: ['看看周围有什么', '打开餐边柜的抽屉，看看里面有什么', '把红色的碗放到操作台上', '停下来，原地待命'],
     empty: '给机器人下达新任务；本轮对话期间机器人由操作员接管，后台循环搬运暂停，结束后自动继续。机器人只能依靠自己的感知（Ego State）。' },
 };
 const esc = (s) => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));

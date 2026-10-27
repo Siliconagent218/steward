@@ -36,6 +36,19 @@ _JOINT_WIDTH = {int(mujoco.mjtJoint.mjJNT_FREE): (7, 6), int(mujoco.mjtJoint.mjJ
                 int(mujoco.mjtJoint.mjJNT_SLIDE): (1, 1), int(mujoco.mjtJoint.mjJNT_HINGE): (1, 1)}
 
 
+_COLOR_NAMES = {
+    "red": (0.85, 0.15, 0.15), "green": (0.15, 0.70, 0.25), "blue": (0.15, 0.35, 0.90), "black": (0.06, 0.06, 0.07),
+    "white": (0.95, 0.95, 0.96), "gray": (0.60, 0.62, 0.65), "brown": (0.58, 0.40, 0.24), "beige": (0.80, 0.67, 0.50),
+    "yellow": (0.90, 0.85, 0.20),
+}
+
+
+def color_name(rgba) -> str:
+    """Nearest named colour of an RGBA value."""
+    rgb = np.asarray(rgba[:3], float)
+    return min(_COLOR_NAMES, key=lambda k: float(np.sum((rgb - np.asarray(_COLOR_NAMES[k])) ** 2)))
+
+
 class EditError(ValueError):
     """A live World State edit was rejected; the world is unchanged."""
 
@@ -51,11 +64,14 @@ class PerceptionConfig:
     odom_yaw_sigma: float = 0.003
     confusion: dict[str, list[str]] = field(default_factory=lambda: {"cup": ["bowl"], "bowl": ["cup"]})
     confusion_prob: float = 0.03
+    transparent_detect_prob: float = 0.6
 
 
 @dataclass
 class GraspConfig:
     capture_radius: float = 0.06
+    handle_kp: float = 3000.0
+    handle_kd: float = 120.0
 
 
 @dataclass
@@ -75,6 +91,7 @@ class _RobotState:
     attached: str | None = None
     rel: dict | None = None
     saved_contacts: dict[int, tuple[int, int]] = field(default_factory=dict)
+    handle: dict | None = None  # articulated grasp: {"entity", "link", "dof", "axis", "q0", "grip0", "lo", "hi"}
 
 
 class WorldSim:
@@ -84,6 +101,9 @@ class WorldSim:
         self._initial_scene = copy.deepcopy(scene)
         self.timestep = timestep
         self.speed = speed
+        # Steps per locked batch when the loop is behind: short batches keep robot commands within
+        # 50 ms of simulated time even when the physics cannot keep up with the requested speed.
+        self.max_batch = 25
         self.perception = perception or PerceptionConfig()
         self.grasp = grasp or GraspConfig()
         self._seed = seed
@@ -110,11 +130,17 @@ class WorldSim:
             close_renderer(renderer)
         self._epoch = getattr(self, "_epoch", 0) + 1
         self._renderers: dict[tuple[int, int], mujoco.Renderer] = {}
+        self._index_bodies()
+        self.step_count = 0
+
+    def _index_bodies(self) -> None:
         self._body_entity: dict[int, str] = {}
+        self._body_link: dict[int, str] = {}
         for eid, names in self.build.names.items():
             for bid in entity_body_ids(self.model, names):
                 self._body_entity[bid] = eid
-        self.step_count = 0
+            for link_id, body_name in names.bodies.items():
+                self._body_link[mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, body_name)] = link_id
 
     def _default_overview(self) -> dict:
         span = 6.0
@@ -297,13 +323,11 @@ class WorldSim:
             if name in ctrl:
                 self.data.ctrl[a] = ctrl[name]
         self.data.time = sim_time
-        self._body_entity = {}
-        for eid, names in self.build.names.items():
-            for bid in entity_body_ids(self.model, names):
-                self._body_entity[bid] = eid
+        self._index_bodies()
         self.robots = {e.id: robots.get(e.id, _RobotState(e.id)) for e in scene.entities if e.role == "robot"}
         for rs in self.robots.values():
             rs.saved_contacts = {}
+            rs.handle = None
             if rs.attached is not None and scene.find(rs.attached) is None:
                 rs.attached, rs.rel = None, None
             if rs.attached is not None:
@@ -323,6 +347,7 @@ class WorldSim:
     def step(self, n: int = 1) -> None:
         with self.lock:
             for _ in range(n):
+                self._drive_handles()
                 mujoco.mj_step(self.model, self.data)
                 self._follow_attached()
                 self.step_count += 1
@@ -363,7 +388,7 @@ class WorldSim:
             if behind > self.timestep:
                 with self.lock:
                     if self._epoch == epoch0:
-                        self.step(min(int(behind / self.timestep), 200))
+                        self.step(min(int(behind / self.timestep), self.max_batch))
             else:
                 time.sleep(0.001)
 
@@ -405,16 +430,28 @@ class WorldSim:
         return {"p": self.data.xpos[bid].tolist(), "q": self.data.xquat[bid].tolist()}
 
     def _try_attach(self, rs: _RobotState) -> None:
+        """Ideal grasp: attach the nearest free object within capture range that has nothing resting
+        on or in it (the top of a stack), or else grasp the nearest drawer handle."""
         grip = np.asarray(self.gripper_pose(rs.entity_id)["p"])
+        supporting = {r.b["entity"] for r in self._relations()
+                      if r.type == "supported-by" and self.template.entity(r.a["entity"]).rigid.root.value == "free"}
         best, best_d = None, self.grasp.capture_radius
         for ent in self.template.entities:
-            if ent.role != "object" or ent.rigid.root.value != "free":
+            if ent.role != "object" or ent.rigid.root.value != "free" or ent.id in supporting:
+                continue
+            if any(other.attached == ent.id for other in self.robots.values()):
                 continue
             obb = entity_obb(self.model, self.data, self.build.names[ent.id])
             d = float(np.linalg.norm(np.asarray(obb.center) - grip))
             if d <= best_d:
                 best, best_d = ent.id, d
         if best is None:
+            handle = self._nearest_handle(grip)
+            if handle is not None:
+                rs.handle = handle
+                self.events.append({"t": self.time, "type": "grasp/handle", "robot": rs.entity_id,
+                                    "entity": handle["entity"], "link": handle["link"]})
+                return
             self.events.append({"t": self.time, "type": "grasp/miss", "robot": rs.entity_id})
             return
         body = self._root_body(best)
@@ -428,7 +465,56 @@ class WorldSim:
                 self.model.geom_conaffinity[gid] = 0
         self.events.append({"t": self.time, "type": "grasp/attach", "robot": rs.entity_id, "entity": best})
 
+    def _nearest_handle(self, grip: np.ndarray) -> dict | None:
+        """The drawer handle (front-most geom of a ``graspable-handle`` link) within capture range."""
+        best, best_d = None, self.grasp.capture_radius
+        for ent in self.template.entities:
+            for link, joint in self._handle_links(ent):
+                bid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, self.build.names[ent.id].bodies[link.id])
+                geoms = [g for g in range(self.model.ngeom) if self.model.geom_bodyid[g] == bid]
+                rot = self.data.xmat[bid].reshape(3, 3)
+                front = max(geoms, key=lambda g: float((rot.T @ (self.data.geom_xpos[g] - self.data.xpos[bid]))[0]))
+                d = float(np.linalg.norm(self.data.geom_xpos[front] - grip))
+                if d > best_d:
+                    continue
+                jid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, self.build.names[ent.id].joints[joint.id])
+                lo, hi = self.model.jnt_range[jid]
+                best_d = d
+                best = {"entity": ent.id, "link": link.id, "dof": int(self.model.jnt_dofadr[jid]),
+                        "qadr": int(self.model.jnt_qposadr[jid]), "axis": (rot @ np.asarray(joint.axis.value)).tolist(),
+                        "q0": float(self.data.qpos[self.model.jnt_qposadr[jid]]), "grip0": grip.tolist(),
+                        "lo": float(lo), "hi": float(hi)}
+        return best
+
+    @staticmethod
+    def _handle_links(ent):
+        if ent.role != "object":
+            return []
+        joints = {j.child: j for j in ent.rigid.joints if j.type.value == "prismatic"}
+        return [(link, joints[link.id]) for link in ent.rigid.links
+                if link.id in joints and any(a.value == "graspable-handle" for a in link.affordances)]
+
+    def _drive_handles(self) -> None:
+        """A grasped drawer follows the gripper along its slide axis (PD force on the slide joint)."""
+        for rs in self.robots.values():
+            h = rs.handle
+            if h is None:
+                continue
+            grip = np.asarray(self.gripper_pose(rs.entity_id)["p"])
+            target = min(max(h["q0"] + float((grip - np.asarray(h["grip0"])) @ np.asarray(h["axis"])), h["lo"]), h["hi"])
+            q, qd = self.data.qpos[h["qadr"]], self.data.qvel[h["dof"]]
+            self.data.qfrc_applied[h["dof"]] = self.grasp.handle_kp * (target - q) - self.grasp.handle_kd * qd
+
+    def _release_handle(self, rs: _RobotState) -> None:
+        h = rs.handle
+        self.data.qfrc_applied[h["dof"]] = 0.0
+        self.events.append({"t": self.time, "type": "grasp/handle-release", "robot": rs.entity_id,
+                            "entity": h["entity"], "link": h["link"]})
+        rs.handle = None
+
     def _release(self, rs: _RobotState) -> None:
+        if rs.handle is not None:
+            self._release_handle(rs)
         if rs.attached is None:
             return
         for gid, (ct, ca) in rs.saved_contacts.items():
@@ -511,7 +597,13 @@ class WorldSim:
             if (upper, lower) in seen or self._entity_role(upper) != "object":
                 continue
             seen.add((upper, lower))
-            rels.append(Relation(type="supported-by", a={"entity": upper}, b={"entity": lower}, derived=True))
+            lower_body = int(self.model.geom_bodyid[con.geom1 if normal_z > 0 else con.geom2])
+            b = {"entity": lower}
+            link = self._body_link.get(lower_body)
+            if link is not None and len(self.template.entity(lower).rigid.links) > 1 and lower != "w:room":
+                if self.template.entity(lower).role != "environment":
+                    b["link"] = link
+            rels.append(Relation(type="supported-by", a={"entity": upper}, b=b, derived=True))
         return rels
 
     def _entity_role(self, entity_id: str) -> str:
@@ -552,22 +644,41 @@ class WorldSim:
                 "stamp": self.time,
                 "odometry": odom,
                 "joints": joints,
-                "gripper": {"state": "closed" if rs.closed else "open", "holding": rs.attached is not None},
+                "gripper": {"state": "closed" if rs.closed else "open",
+                            "holding": rs.attached is not None or rs.handle is not None,
+                            "holdingHandle": rs.handle is not None},
                 "camera": {"id": sensor["id"], "intrinsics": sensor["intrinsics"]},
                 "detections": self._detections(robot_id, cam_pose, sensor),
             }
+
+    def perception_parts(self, ent) -> list[tuple[str, list[str] | None, str]]:
+        """What a detector reports for one entity: ``(part id, links, category)``. Building walls and
+        drawers are reported as separate parts; everything else as the whole entity."""
+        if ent.role == "environment":
+            return [(f"{ent.id}/{link.id}", [link.id], "wall") for link in ent.rigid.links if link.id != "floor"]
+        drawers = [link.id for link, _ in self._handle_links(ent)]
+        if not drawers:
+            return [(ent.id, None, ent.category.value)]
+        rest = [link.id for link in ent.rigid.links if link.id not in drawers]
+        return [(ent.id, rest, ent.category.value)] + [(f"{ent.id}/{d}", [d], "drawer") for d in drawers]
 
     def _detection_targets(self, robot_id: str):
         for ent in self.template.entities:
             if ent.id == robot_id:
                 continue
-            if ent.role == "environment":
-                for link in ent.rigid.links:
-                    if link.id == "floor":
-                        continue
-                    yield ent, [link.id], "wall"
-            else:
-                yield ent, None, ent.category.value
+            for _, links, category in self.perception_parts(ent):
+                yield ent, links, category
+
+    def _appearance(self, ent, links: list[str] | None) -> tuple[str, float]:
+        """Colour name and opacity of a part, from its largest collision geom."""
+        names = self.build.names[ent.id]
+        body_ids = set(entity_body_ids(self.model, names, links))
+        geoms = [g for g in range(self.model.ngeom) if self.model.geom_bodyid[g] in body_ids and self.model.geom_group[g] != 1]
+        if not geoms:
+            return "unknown", 1.0
+        big = max(geoms, key=lambda g: float(self.model.geom_rbound[g]))
+        rgba = self.model.geom_rgba[big]
+        return color_name(rgba), float(rgba[3])
 
     def _detections(self, robot_id: str, cam_pose: dict, sensor: dict) -> list[dict]:
         p = self.perception
@@ -590,11 +701,15 @@ class WorldSim:
             noisy_p = [rel["p"][i] + self.rng.normal(0, sigma) for i in range(3)]
             noisy_q = quat_normalize(quat_mul(rel["q"], quat_from_yaw(self.rng.normal(0, p.yaw_sigma))))
             size = [max(0.005, s * (1 + self.rng.normal(0, p.size_sigma_rel))) for s in obb.size]
+            color, alpha = self._appearance(ent, links)
+            if alpha < 0.5 and self.rng.random() > p.transparent_detect_prob:
+                continue
             label = category
             if category in p.confusion and self.rng.random() < p.confusion_prob:
                 label = str(self.rng.choice(p.confusion[category]))
             dets.append({"category": label, "confidence": round(float(0.9 - 0.05 * rng_m / p.max_range), 3),
-                         "pose": {"p": noisy_p, "q": noisy_q}, "size": size, "range": rng_m})
+                         "pose": {"p": noisy_p, "q": noisy_q}, "size": size, "range": rng_m,
+                         "color": "clear" if alpha < 0.5 else color})
         return dets
 
     def _visible(self, obb, cam_inv: dict, cam_p: np.ndarray, half_h: float, half_v: float,

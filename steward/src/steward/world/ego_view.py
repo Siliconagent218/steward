@@ -1,7 +1,8 @@
 """Render a robot's Ego-State as a 3D scene for the Steward console.
 
 The Ego-State is converted with the same SceneState → MJCF converter that ESim uses, so the
-picture is the robot's own model of the world: only perceived entities, coloured by category,
+picture is the robot's own model of the world: only perceived entities, coloured by the colour it
+perceived (or by category),
 fainter when their existence probability is low, the robot body at its own estimated pose, and a
 neutral floor for orientation. Walls on the camera side are left out so the camera looks into the
 room.
@@ -30,7 +31,13 @@ from steward.scene.schema import SceneState
 CATEGORY_RGB = {
     "table": [0.79, 0.64, 0.42], "counter": [0.54, 0.42, 0.29], "cabinet": [0.63, 0.47, 0.31],
     "sideboard": [0.69, 0.53, 0.38], "cup": [0.50, 0.83, 1.00], "bowl": [0.91, 0.91, 0.92],
-    "plate": [0.95, 0.95, 0.95], "wall": [0.55, 0.58, 0.62],
+    "plate": [0.95, 0.95, 0.95], "wall": [0.55, 0.58, 0.62], "drawer": [0.80, 0.67, 0.50],
+    "wine_glass": [0.80, 0.92, 0.98], "mug": [0.12, 0.12, 0.13], "teddy_bear": [0.58, 0.38, 0.20],
+    "scissors": [0.70, 0.72, 0.75],
+}
+COLOR_RGB = {
+    "red": [0.85, 0.15, 0.15], "green": [0.15, 0.70, 0.25], "blue": [0.15, 0.35, 0.90], "black": [0.12, 0.12, 0.13],
+    "white": [0.93, 0.93, 0.94], "clear": [0.80, 0.92, 0.98], "yellow": [0.90, 0.85, 0.20],
 }
 DEFAULT_RGB = [0.62, 0.68, 0.75]
 FLOOR_ID = "e:render-floor"
@@ -48,7 +55,8 @@ def ego_render_scene(ego: dict, toward_camera: np.ndarray, room_center: list[flo
                 norm = float(np.linalg.norm(offset))
                 if norm > 1e-6 and float(offset @ toward_camera) / norm > 0.35:
                     continue
-            rgb = CATEGORY_RGB.get(ent["category"]["value"], DEFAULT_RGB)
+            seen = (ent.get("stateVars", {}).get("color") or {}).get("value")
+            rgb = COLOR_RGB.get(seen) or CATEGORY_RGB.get(ent["category"]["value"], DEFAULT_RGB)
             alpha = 1.0 if ent["role"] == "environment" else 0.35 + 0.65 * float(ent.get("existence", 1.0))
             for link in ent["body"]["links"]:
                 for geom in link["geometry"].get("collision", []):

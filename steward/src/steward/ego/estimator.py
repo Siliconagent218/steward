@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from steward.ego.planner import Box2D, protrusion
 from steward.ego.priors import compatible, prior
 from steward.math3d import pose_compose, pose_inverse, quat_from_yaw, wrap_angle, yaw_from_quat
 from steward.scene.schema import Entity, Est, Link, Relation, RigidTree, SceneState, primitive
@@ -42,10 +43,19 @@ class Track:
     existence: float = 0.5
     held: bool = False
     held_offset: np.ndarray | None = None
+    color_counts: dict[str, float] = field(default_factory=dict)
 
     @property
     def category(self) -> str:
         return max(self.category_counts, key=self.category_counts.get)
+
+    @property
+    def color(self) -> str | None:
+        return max(self.color_counts, key=self.color_counts.get) if self.color_counts else None
+
+    @property
+    def footprint(self) -> float:
+        return float(max(self.size[0], self.size[1]))
 
     @property
     def sigma(self) -> float:
@@ -65,6 +75,7 @@ class EstimatorConfig:
     process_noise: float = 1e-6
     gate_m: float = 0.30
     size_gate_ratio: float = 0.25
+    size_match_log: float = 0.15
     missed_decay: float = 0.97
     drop_below: float = 0.05
     max_range: float = 8.0
@@ -136,7 +147,7 @@ class EgoEstimator:
             measurements.append((det, np.asarray(world["p"]), yaw_from_quat(world["q"]), sigma))
         matched: set[str] = set()
         for det, pos, yaw, sigma in sorted(measurements, key=lambda m: m[3]):
-            track = self._associate(det["category"], pos, sigma, matched)
+            track = self._associate(det["category"], pos, sigma, matched, float(max(det["size"][0], det["size"][1])))
             if track is None:
                 track = self._new_track(det, pos, yaw, sigma)
             else:
@@ -154,10 +165,17 @@ class EgoEstimator:
                    self.config.size_gate_ratio * float(max(track.size[0], track.size[1])))
         return max(gate, 0.15) if track.held else gate
 
-    def _associate(self, category: str, pos: np.ndarray, sigma: float, taken: set[str]) -> Track | None:
+    def _size_match(self, a: float, b: float) -> bool:
+        """Footprints of the same object agree within the detector's size noise; nested bowls do not."""
+        return abs(math.log(max(a, 1e-3) / max(b, 1e-3))) <= self.config.size_match_log
+
+    def _associate(self, category: str, pos: np.ndarray, sigma: float, taken: set[str],
+                   footprint: float | None = None) -> Track | None:
         best, best_d = None, None
         for track in self.tracks.values():
             if track.id in taken or not compatible(category, track.category):
+                continue
+            if footprint is not None and not track.held and not self._size_match(footprint, track.footprint):
                 continue
             d = float(np.linalg.norm(track.pos - pos))
             if d <= self._gate(track, sigma) and (best_d is None or d < best_d):
@@ -176,6 +194,8 @@ class EgoEstimator:
                 drop = self.tracks.get(drop_id)
                 if drop is None or drop.held or not compatible(drop.category, keep.category):
                     continue
+                if not self._size_match(drop.footprint, keep.footprint):
+                    continue
                 z_tol = max(0.5 * max(keep.size[2], drop.size[2], 0.1), 3.0 * _sigma_z(keep, drop))
                 if abs(drop.pos[2] - keep.pos[2]) > z_tol:
                     continue
@@ -186,6 +206,8 @@ class EgoEstimator:
                 keep.var = 1.0 / (w_keep + w_drop)
                 for cat, n in drop.category_counts.items():
                     keep.category_counts[cat] = keep.category_counts.get(cat, 0.0) + n
+                for col, n in drop.color_counts.items():
+                    keep.color_counts[col] = keep.color_counts.get(col, 0.0) + n
                 keep.observations += drop.observations
                 keep.existence = max(keep.existence, drop.existence)
                 keep.last_seen = max(keep.last_seen, drop.last_seen)
@@ -203,12 +225,15 @@ class EgoEstimator:
             observations=1,
             first_seen=self.stamp,
             last_seen=self.stamp,
+            color_counts={det["color"]: 1.0} if det.get("color") else {},
         )
         self.tracks[track.id] = track
         return track
 
     def _fuse(self, track: Track, det: dict, pos: np.ndarray, yaw: float, sigma: float) -> None:
         track.category_counts[det["category"]] = track.category_counts.get(det["category"], 0.0) + 1.0
+        if det.get("color"):
+            track.color_counts[det["color"]] = track.color_counts.get(det["color"], 0.0) + 1.0
         track.observations += 1
         track.last_seen = self.stamp
         track.existence = min(1.0, track.existence + 0.2 * (1.0 - track.existence))
@@ -233,7 +258,7 @@ class EgoEstimator:
         inv = pose_inverse(cam)
         for tid in list(self.tracks):
             track = self.tracks[tid]
-            if tid in matched or track.held:
+            if tid in matched or track.held or self._in_closed_drawer(track):
                 continue
             local = pose_compose(inv, {"p": track.pos.tolist(), "q": [1, 0, 0, 0]})["p"]
             if not (0.3 < local[0] < self.config.max_range * 0.8):
@@ -266,18 +291,49 @@ class EgoEstimator:
 
     # ------------------------------------------------------------------ output
     def support_of(self, track: Track) -> Track | None:
-        best = None
+        """What holds a track: the innermost receptacle (drawer, larger bowl) whose floor it rests
+        on, else the highest support surface whose top it rests on."""
+        inside, best = None, None
         for other in self.tracks.values():
-            if other.id == track.id or "support-surface" not in prior(other.category)["affordances"]:
+            if other.id == track.id or other.held:
                 continue
-            if abs(other.top() - track.bottom()) > max(0.06, 2.5 * _sigma_z(track, other)):
+            affordances = prior(other.category)["affordances"]
+            z_tol = max(0.06, 2.5 * _sigma_z(track, other))
+            local = _to_local_xy(other, track.pos)
+            if "receptacle" in affordances and track.footprint < other.footprint:
+                within = abs(local[0]) <= other.size[0] / 2 and abs(local[1]) <= other.size[1] / 2
+                if within and -0.03 <= track.bottom() - other.bottom() <= min(z_tol, 0.5 * other.size[2]):
+                    if inside is None or other.bottom() > inside.bottom():
+                        inside = other
+                    continue
+            if "support-surface" not in affordances or abs(other.top() - track.bottom()) > z_tol:
                 continue
             margin = max(0.02, 2.0 * track.sigma)
-            local = _to_local_xy(other, track.pos)
             if abs(local[0]) <= other.size[0] / 2 + margin and abs(local[1]) <= other.size[1] / 2 + margin:
                 if best is None or other.top() > best.top():
                     best = other
-        return best
+        return inside or best
+
+    def _in_closed_drawer(self, track: Track) -> bool:
+        holder = self.support_of(track)
+        return holder is not None and holder.category == "drawer" and self.drawer_opening(holder) < 0.08
+
+    def drawer_opening(self, drawer: Track) -> float:
+        """How far a drawer sticks out of the furniture holding it, along the drawer's front axis."""
+        furniture = [_box2d(t) for t in self.tracks.values()
+                     if t.id != drawer.id and "support-surface" in prior(t.category)["affordances"]]
+        return protrusion(_box2d(drawer), furniture)
+
+    def shift(self, track_id: str, delta: np.ndarray) -> list[str]:
+        """Move a track the robot itself moved (a drawer it pulled) together with what it holds."""
+        track = self.tracks.get(track_id)
+        if track is None:
+            return []
+        carried = [t.id for t in self.tracks.values() if t.id != track_id and not t.held and self.support_of(t) is track]
+        for tid in [track_id, *carried]:
+            self.tracks[tid].pos = self.tracks[tid].pos + np.asarray(delta, float)
+        self.version += 1
+        return carried
 
     def to_scene(self) -> SceneState:
         entities = [self._self_entity()]
@@ -287,7 +343,7 @@ class EgoEstimator:
             if track.held:
                 relations.append(Relation(type="attached", a={"entity": track.id}, b={"entity": SELF_ID, "link": "gripper"},
                                           mode="rigid", derived=False, confidence=1.0))
-            else:
+            elif prior(track.category)["root"].get("fixed", 0.0) < 0.9:
                 support = self.support_of(track)
                 if support is not None:
                     relations.append(Relation(type="supported-by", a={"entity": track.id}, b={"entity": support.id},
@@ -316,7 +372,7 @@ class EgoEstimator:
         total = sum(track.category_counts.values())
         cat_unc = {"kind": "categorical", "p": {k: round(v / total, 4) for k, v in track.category_counts.items()}}
         src = "fused" if track.observations > 1 else "observed"
-        inflate = 2.0 * track.sigma
+        inflate = 0.0 if track.held else 2.0 * track.sigma
         size = [float(track.size[0] + inflate), float(track.size[1] + inflate), float(track.size[2])]
         link = Link(
             id="body", name=track.category,
@@ -334,7 +390,12 @@ class EgoEstimator:
             body=RigidTree(root=Est(value=root_value, unc={"kind": "categorical", "p": p["root"]}, src="prior"),
                            links=[link]),
             existence=round(track.existence, 4),
+            state_vars={"color": Est(value=track.color, src=src)} if track.color else {},
         )
+
+
+def _box2d(track: Track) -> Box2D:
+    return Box2D(track.id, float(track.pos[0]), float(track.pos[1]), track.yaw, track.size[0] / 2, track.size[1] / 2)
 
 
 def _gaussian6(diag: list[float]) -> dict:

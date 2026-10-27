@@ -20,7 +20,7 @@ from steward.assets.generators import GENERATORS
 from steward.assets.library import AssetLibrary, instantiate
 from steward.assets.preview import render_scene, render_template
 from steward.assets.validator import validate_template
-from steward.math3d import pose_compose, quat_from_yaw
+from steward.math3d import pose_compose, quat_from_yaw, yaw_from_quat
 from steward.scene.extent import entity_obb
 from steward.scene.mjcf import build_mjcf
 from steward.scene.schema import SceneState, SpatialLayers, pose
@@ -111,7 +111,32 @@ class AuthoringService:
             local = pose_compose(sp, pose([dx, dy, 0.0]))
             yaw = placement.get("yaw", 0.0)
             return pose([local["p"][0], local["p"][1], top + 0.001], quat_from_yaw(yaw))
-        raise AuthoringError(f"placement {placement['id']!r} needs 'at' or 'on'")
+        if "in" in placement:
+            return self._inside_pose(scene, placement)
+        raise AuthoringError(f"placement {placement['id']!r} needs 'at', 'on' or 'in'")
+
+    def _inside_pose(self, scene: SceneState, placement: dict) -> dict:
+        """Pose on the floor of a container link (a drawer), ``offset`` in the container frame."""
+        holder = scene.find(placement["in"])
+        if holder is None:
+            raise AuthoringError(f"container {placement['in']!r} must be placed before {placement['id']!r}")
+        links = [link.id for link in holder.rigid.links if any(a.value == "container" for a in link.affordances)]
+        link = placement.get("link") or (links[0] if links else None)
+        if link not in links:
+            raise AuthoringError(f"{holder.id} has no container link {link!r} (container links: {links})")
+        probe = SceneState(mode="world", entities=[holder])
+        build = build_mjcf(probe)
+        model = build.compile()
+        data = mujoco.MjData(model)
+        build.apply_initial(model, data)
+        obb = entity_obb(model, data, build.names[holder.id], [link])
+        floor = obb.center[2] - obb.size[2] / 2 + 0.011
+        dx, dy = placement.get("offset", [0.0, 0.0])
+        yaw0 = yaw_from_quat(obb.quat)
+        c, s = math.cos(yaw0), math.sin(yaw0)
+        x = obb.center[0] + c * dx - s * dy
+        y = obb.center[1] + s * dx + c * dy
+        return pose([x, y, floor + 0.001], quat_from_yaw(yaw0 + placement.get("yaw", 0.0)))
 
     def check_scene(self, scene_dict: dict, settle_seconds: float = 1.0) -> dict:
         report = {"ok": False, "errors": [], "metrics": {}}
@@ -242,6 +267,35 @@ def shuttle_spec() -> dict:
     }
 
 
+CHORES_TASK = ("餐桌上的三个颜色、大小不同的碗、一个透明高脚酒杯和一个黑色咖啡杯：先在餐桌上按从小到大的顺序排成一排；"
+               "再搬到餐边柜台面上，能叠的碗叠起来，整齐摆放；然后把餐边柜抽屉里的东西和柜子抽屉里的东西对调。"
+               "以上任务循环重复。")
+
+
+def chores_spec() -> dict:
+    """Kitchen for the chores task: five tableware items scattered on the far half of the table, a
+    teddy bear and scissors in the sideboard drawer, and an empty drawer in the cabinet."""
+    return {
+        "name": "phase0-chores",
+        "entities": [
+            {"id": "w:room", "asset": "kitchen-room", "at": {"x": 0.0, "y": 0.0}},
+            {"id": "w:counter-1", "asset": "counter", "at": {"x": 0.0, "y": 2.18}},
+            {"id": "w:cabinet-1", "asset": "tall-drawer-cabinet", "at": {"x": 2.70, "y": 0.6, "yaw": math.pi}},
+            {"id": "w:sideboard-1", "asset": "drawer-sideboard", "at": {"x": -2.755, "y": 0.6}},
+            {"id": "w:table-1", "asset": "dining-table", "at": {"x": 0.6, "y": -0.9}},
+            {"id": "w:bowl-red", "asset": "bowl-red-large", "on": "w:table-1", "offset": [-0.36, -0.17]},
+            {"id": "w:wine-glass", "asset": "wine-glass", "on": "w:table-1", "offset": [-0.10, -0.22]},
+            {"id": "w:bowl-green", "asset": "bowl-green-medium", "on": "w:table-1", "offset": [0.12, -0.18]},
+            {"id": "w:mug", "asset": "black-mug", "on": "w:table-1", "offset": [0.33, -0.24], "yaw": 0.8},
+            {"id": "w:bowl-blue", "asset": "bowl-blue-small", "on": "w:table-1", "offset": [0.48, -0.12]},
+            {"id": "w:teddy-bear", "asset": "teddy-bear", "in": "w:sideboard-1", "offset": [-0.02, -0.12]},
+            {"id": "w:scissors", "asset": "scissors", "in": "w:sideboard-1", "offset": [0.0, 0.12], "yaw": 0.3},
+            {"id": "w:robot-1", "asset": "steward-bot", "at": {"x": -1.6, "y": -1.3, "yaw": 0.0}},
+        ],
+        "regions": [{"id": "kitchen", "label": "kitchen", "polygon": [[-3, -2.5], [3, -2.5], [3, 2.5], [-3, 2.5]]}],
+    }
+
+
 KITCHEN_ASSETS = {
     "kitchen-room": ("building", {"width": 6.0, "depth": 5.0}),
     "counter": ("counter", {}),
@@ -252,6 +306,15 @@ KITCHEN_ASSETS = {
     "bowl": ("bowl", {}),
     "plate": ("plate", {}),
     "steward-bot": ("steward_bot", {}),
+    "drawer-sideboard": ("sideboard", {"drawer_width": 0.6, "drawer_height": 0.22}),
+    "tall-drawer-cabinet": ("cabinet_with_drawer", {"drawer_height": 0.24}),
+    "bowl-red-large": ("nesting_bowl", {"radius": 0.11, "height": 0.07, "mass": 0.45, "color": "red"}),
+    "bowl-green-medium": ("nesting_bowl", {"radius": 0.085, "height": 0.06, "mass": 0.35, "color": "green"}),
+    "bowl-blue-small": ("nesting_bowl", {"radius": 0.065, "height": 0.05, "mass": 0.25, "color": "blue"}),
+    "wine-glass": ("wine_glass", {}),
+    "black-mug": ("mug", {"color": "black"}),
+    "teddy-bear": ("teddy_bear", {}),
+    "scissors": ("scissors", {}),
 }
 
 
@@ -277,5 +340,12 @@ def build_default_kitchen(service: AuthoringService) -> dict:
         "robots": ["w:robot-1"],
         "task": SHUTTLE_TASK,
         "shuttle": {"supports": ["table", "cabinet", "sideboard"], "objects": ["cup", "bowl"]},
+    })
+    service.compose_scene(chores_spec())
+    service.save_scenario({
+        "name": "phase0-chores",
+        "scene": "phase0-chores",
+        "robots": ["w:robot-1"],
+        "task": CHORES_TASK,
     })
     return {"assets": {k: v["version"][:12] for k, v in published.items()}, "scene": scene, "scenario": scenario}

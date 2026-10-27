@@ -44,14 +44,9 @@ class Observer:
                 continue
             if ent.role == "robot":
                 continue
-            if ent.role == "environment":
-                for link in ent.rigid.links:
-                    if link.id != "floor":
-                        obb = sim.entity_obb(ent.id, [link.id])
-                        gt.append({"id": f"{ent.id}/{link.id}", "category": "wall", "center": obb.center, "env": True})
-            else:
-                obb = sim.entity_obb(ent.id)
-                gt.append({"id": ent.id, "category": ent.category.value, "center": obb.center, "env": False})
+            for part, links, category in sim.perception_parts(ent):
+                obb = sim.entity_obb(ent.id, links)
+                gt.append({"id": part, "category": category, "center": obb.center, "env": category == "wall"})
         return gt, robot_pose
 
     def ingest(self, robot_id: str, ego: dict) -> dict:

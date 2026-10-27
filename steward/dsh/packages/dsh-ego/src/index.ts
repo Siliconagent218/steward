@@ -22,7 +22,7 @@ export interface JsonObject {
 }
 
 /** Skills the Ego Runtime can predict and run. */
-export type EgoSkill = 'navigate' | 'pick' | 'place'
+export type EgoSkill = 'navigate' | 'pick' | 'place' | 'open' | 'close'
 
 /** Filter for Ego-State object queries. */
 export interface EgoQuery {

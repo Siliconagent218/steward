@@ -67,6 +67,21 @@ def floor_obstacles(es: SceneState, exclude: set[str], floor_obstacle_height: fl
     return out
 
 
+def protrusion(drawer: Box2D, furniture: list[Box2D]) -> float:
+    """How far a drawer box sticks out past the front of the furniture box that holds it, along the
+    drawer's +x (front) axis; 0 when no furniture box contains the drawer's back end."""
+    n = (math.cos(drawer.yaw), math.sin(drawer.yaw))
+    front = drawer.cx * n[0] + drawer.cy * n[1] + drawer.hx
+    back = (drawer.cx - n[0] * (drawer.hx - 0.03), drawer.cy - n[1] * (drawer.hx - 0.03))
+    best = None
+    for box in furniture:
+        if box.id == drawer.id or not box.contains(back[0], back[1], inflate=0.05):
+            continue
+        reach = max((c[0] * n[0] + c[1] * n[1]) for c in box.corners())
+        best = front - reach if best is None else min(best, front - reach)
+    return max(0.0, best) if best is not None else 0.0
+
+
 def rects_overlap(a: Box2D, b: Box2D) -> bool:
     """Separating-axis test for two oriented rectangles."""
     pa, pb = a.corners(), b.corners()

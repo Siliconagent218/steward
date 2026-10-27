@@ -102,12 +102,15 @@ export function egoTools(ego: EgoService): ToolDefinition[] {
       description: 'Predict the consequences of a skill before doing it. Returns a receipt with a risk score, the '
         + 'issues found (for example a target whose position is too uncertain to grasp reliably), and the planned '
         + 'motion. Skills: "navigate" (needs x, y, optional yaw in radians), "pick" (needs target), "place" (needs '
-        + 'on; optional offset [dx, dy] in metres in the support frame). If the risk is too high, follow the issues '
-        + '(for example move closer and observe) and predict again. A receipt can be run once and expires.',
+        + 'on: a surface, an open drawer to put the object into, or a larger bowl to nest a bowl in; optional offset '
+        + '[dx, dy] in metres in the surface frame), "open" / "close" (needs target: a drawer; the robot pulls or '
+        + 'pushes its handle and ends standing back so the inside is in view). Objects inside a drawer are only '
+        + 'seen while it is open. If the risk is too high, follow the issues (for example move closer and observe) '
+        + 'and predict again. A receipt can be run once and expires.',
       parameters: {
-        skill: { type: 'string', enum: ['navigate', 'pick', 'place'], required: true, description: 'Skill to predict.' },
-        target: { type: 'string', description: 'pick: id of the object to grasp.' },
-        on: { type: 'string', description: 'place: id of the surface to put the held object on.' },
+        skill: { type: 'string', enum: ['navigate', 'pick', 'place', 'open', 'close'], required: true, description: 'Skill to predict.' },
+        target: { type: 'string', description: 'pick: id of the object to grasp; open/close: id of the drawer.' },
+        on: { type: 'string', description: 'place: id of the surface, open drawer or larger bowl to put the held object on or in.' },
         offset: { type: 'array', items: { type: 'number' }, description: 'place: [dx, dy] on the surface, metres.' },
         x: { type: 'number', description: 'navigate: goal x in metres.' },
         y: { type: 'number', description: 'navigate: goal y in metres.' },

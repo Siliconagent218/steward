@@ -6,6 +6,7 @@
     steward up                       run world and ego for every scenario robot in one process
     steward demo                     scripted "cup to table" mission, checked against World State
     steward shuttle                  carry objects around table → cabinet → sideboard, step by step
+    steward chores                   sort tableware, stack it on the sideboard, swap drawer contents; repeat
 """
 
 from __future__ import annotations
@@ -255,15 +256,113 @@ def cmd_shuttle(args) -> int:
     return 0 if ok else 1
 
 
+PHASE_NAMES = {"table": "餐桌按大小排列", "sideboard": "餐边柜叠放", "drawers": "抽屉对调"}
+
+
+def cmd_chores(args) -> int:
+    """Repeat the chores rounds, checking every completed phase against World State."""
+    from steward.chores import chores
+    from steward.mission import MissionFailed
+    from steward.net import call
+    from steward.world.chores_check import check_sideboard, check_swap, check_table, drawer_contents
+
+    host = runtime = api = None
+    if args.api:
+        api_url = args.api.rstrip("/")
+        wca = args.wca.rstrip("/")
+
+        def truth() -> tuple[dict, dict]:
+            boxes = {g["id"]: g for g in call("GET", f"{wca}/console/state")["groundTruth"]}
+            return call("GET", f"{wca}/wca/scene"), boxes
+    else:
+        from steward.authoring.service import AuthoringService, build_default_kitchen
+        from steward.world.console import console_state
+
+        if args.scenario not in AuthoringService(args.root).list_scenarios():
+            build_default_kitchen(AuthoringService(args.root))
+        run_dir = Path(args.root) / "runs" / ("chores-" + time.strftime("%Y%m%d-%H%M%S"))
+        host = _host(args, run_dir)
+        runtime, api = _start_ego(host.robot_servers["w:robot-1"].url, 0, run_dir / "ego")
+        api_url = api.url
+
+        def truth() -> tuple[dict, dict]:
+            return host.sim.world_state(), {g["id"]: g for g in console_state(host)["groundTruth"]}
+        print(json.dumps({"console": f"{host.wca.url}/console"}), flush=True)
+    t0 = time.monotonic()
+    results: list[bool] = []
+    drawers_before = {"contents": drawer_contents(truth()[0])}
+
+    def stamp() -> str:
+        return f"({time.monotonic() - t0:.0f}s)"
+
+    def on_step(record: dict) -> None:
+        print(f"    · {record['text']}  {stamp()}", flush=True)
+
+    def on_phase(index: int, phase: str) -> None:
+        time.sleep(0.5)
+        scene, boxes = truth()
+        if phase == "table":
+            ok, detail = check_table(scene, boxes)
+        elif phase == "sideboard":
+            ok, detail = check_sideboard(scene, boxes)
+        else:
+            ok, detail = check_swap(drawers_before["contents"], scene)
+            drawers_before["contents"] = drawer_contents(scene)
+        results.append(ok)
+        print(f"[第 {index + 1} 轮] {PHASE_NAMES[phase]}完成  World State {'确认' if ok else '不一致'}：{detail}  {stamp()}",
+              flush=True)
+
+    def on_failure(index: int, phase: str, message: str) -> None:
+        print(f"[第 {index + 1} 轮] {PHASE_NAMES[phase]}失败，放下手中物品、重新观察后继续：{message}  {stamp()}", flush=True)
+        drawers_before["contents"] = drawer_contents(truth()[0])
+
+    def on_wait(owner: str) -> None:
+        print(f"[暂停：机器人由 {owner} 接管，交还控制后继续]  {stamp()}", flush=True)
+
+    outcome: dict = {}
+
+    def mission() -> None:
+        try:
+            outcome["result"] = chores(api_url, args.rounds, on_step=on_step, on_phase=on_phase, on_failure=on_failure,
+                                       on_wait=on_wait)
+        except MissionFailed as exc:
+            outcome["error"] = str(exc)
+
+    worker = threading.Thread(target=mission, name="chores", daemon=True)
+    worker.start()
+    interrupted = False
+    try:
+        while worker.is_alive():
+            if host is not None:
+                host.pump(0.05)
+            else:
+                worker.join(0.2)
+    except KeyboardInterrupt:
+        interrupted = True
+        if host is None:
+            call("POST", f"{api_url}/skill/stop", {})
+    finished = "result" in outcome or (interrupted and "error" not in outcome)
+    ok = finished and (args.rounds <= 0 or len(results) == 3 * args.rounds) and all(results)
+    print(json.dumps({"completedPhases": len(results), "allConfirmedByWorldState": ok, "error": outcome.get("error")},
+                     ensure_ascii=False), flush=True)
+    if host is not None:
+        api.stop()
+        runtime.stop()
+        host.stop()
+    return 0 if ok else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="steward")
     parser.add_argument("--root", default=str(DEFAULT_ROOT), help="Steward data root (assets, scenes, runs)")
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("build-kitchen").set_defaults(fn=cmd_build_kitchen)
-    for name, fn in (("world", cmd_world), ("up", cmd_up), ("demo", cmd_demo), ("shuttle", cmd_shuttle)):
+    defaults = {"demo": "phase0-kitchen", "shuttle": "phase0-shuttle"}
+    for name, fn in (("world", cmd_world), ("up", cmd_up), ("demo", cmd_demo), ("shuttle", cmd_shuttle),
+                     ("chores", cmd_chores)):
         p = sub.add_parser(name)
-        p.add_argument("--scenario", default="phase0-kitchen" if name == "demo" else "phase0-shuttle")
-        in_process = name in ("demo", "shuttle")
+        p.add_argument("--scenario", default=defaults.get(name, "phase0-chores"))
+        in_process = name in ("demo", "shuttle", "chores")
         p.add_argument("--speed", type=float, default=4.0 if in_process else 1.0)
         p.add_argument("--seed", type=int, default=0)
         p.add_argument("--wca-port", type=int, default=0 if in_process else 7400)
@@ -278,6 +377,10 @@ def main(argv: list[str] | None = None) -> int:
                            help="Ego API of the robot, for robot tasks from the console chat")
         if name == "up":
             p.add_argument("--api-port", type=int, default=7420)
+        if name == "chores":
+            p.add_argument("--rounds", type=int, default=1, help="number of rounds; 0 repeats until Ctrl-C")
+            p.add_argument("--api", help="Ego API of a running `steward up`; omit to run in-process")
+            p.add_argument("--wca", default="http://127.0.0.1:7400", help="WCA of the running world (with --api)")
         if name == "shuttle":
             p.add_argument("--steps", type=int, default=6, help="number of moves; 0 repeats until Ctrl-C")
             p.add_argument("--api", help="Ego API of a running `steward up`; omit to run in-process")

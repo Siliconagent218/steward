@@ -64,10 +64,11 @@ class SkillExecutor:
     """Runs at most one skill at a time in a worker thread."""
 
     def __init__(self, command: Callable[[dict], None], state: Callable[[], dict], mark_held: Callable[[str], None],
-                 config: MotionConfig | None = None):
+                 config: MotionConfig | None = None, shift: Callable[[str, list[float]], None] | None = None):
         self._command = command
         self._state = state
         self._mark_held = mark_held
+        self._shift = shift
         self.config = config or MotionConfig()
         self._ids = itertools.count(1)
         self._lock = threading.Lock()
@@ -117,6 +118,8 @@ class SkillExecutor:
                 self._pick(job, plan)
             elif skill == "place":
                 self._place(job, plan)
+            elif skill in ("open", "close"):
+                self._drawer(job, plan)
             else:
                 raise SkillFailed(f"unknown skill {skill}")
             job.state, job.message = "succeeded", job.message or f"{skill} completed"
@@ -313,3 +316,38 @@ class SkillExecutor:
         self._set_joint("lift", max(plan["lift"], self.config.stow_lift))
         self._backoff(plan)
         job.message = f"placed {plan['object']} on {plan['support']}"
+
+    def _drawer(self, job: Job, plan: dict) -> None:
+        """Grasp a drawer handle, move the base along the drawer axis to slide it, release and back away."""
+        self._dock(job, plan)
+        handle = plan["handle"]
+        self._align_lateral(handle[:2])
+        self._set_joint("lift", handle[2])
+        self._set_joint("reach", max(0.05, self._reach_to(handle[:2])))
+        miss = float(np.linalg.norm(self._gripper_xy() - np.array(handle[:2])))
+        if miss > plan.get("captureRadius", 0.05):
+            self._set_joint("reach", self.config.retract_reach)
+            self._backoff(plan)
+            raise SkillFailed(f"gripper is {miss * 100:.0f} cm from the handle of {plan['drawer']}; not closing")
+        self._command({"gripper": "close"})
+        self._wait(0.4)
+        if not self._state()["gripper"].get("holdingHandle"):
+            self._command({"gripper": "open"})
+            self._set_joint("reach", self.config.retract_reach)
+            self._backoff(plan)
+            raise SkillFailed(f"missed the handle of {plan['drawer']}")
+        job.log.append(f"grasped the handle of {plan['drawer']}")
+        start = self._state()["odometry"]
+        self._translate_to(plan["end"][0], plan["end"][1], plan["yaw"])
+        end = self._state()["odometry"]
+        self._command({"gripper": "open"})
+        self._wait(0.3)
+        moved = (end["x"] - start["x"]) * plan["axis"][0] + (end["y"] - start["y"]) * plan["axis"][1]
+        if self._shift is not None:
+            self._shift(plan["drawer"], [moved * plan["axis"][0], moved * plan["axis"][1], 0.0])
+        verb = "opened" if plan["direction"] > 0 else "closed"
+        job.log.append(f"{verb} {plan['drawer']} by {abs(moved) * 100:.0f} cm")
+        self._set_joint("reach", self.config.retract_reach)
+        self._translate_to(plan["viewing"][0], plan["viewing"][1], plan["yaw"])
+        self._set_joint("lift", self.config.stow_lift)
+        job.message = f"{verb} {plan['drawer']}"
