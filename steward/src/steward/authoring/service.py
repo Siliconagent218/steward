@@ -308,9 +308,11 @@ KITCHEN_ASSETS = {
     "steward-bot": ("steward_bot", {}),
     "drawer-sideboard": ("sideboard", {"drawer_width": 0.6, "drawer_height": 0.22}),
     "tall-drawer-cabinet": ("cabinet_with_drawer", {"drawer_height": 0.24}),
-    "bowl-red-large": ("nesting_bowl", {"radius": 0.11, "height": 0.07, "mass": 0.45, "color": "red"}),
-    "bowl-green-medium": ("nesting_bowl", {"radius": 0.085, "height": 0.06, "mass": 0.35, "color": "green"}),
-    "bowl-blue-small": ("nesting_bowl", {"radius": 0.065, "height": 0.05, "mass": 0.25, "color": "blue"}),
+    # Diameters 30, 20 and 12 cm: nested, each bowl stands well clear of the wall of the one around
+    # it, so every bowl can be seen and grasped by itself.
+    "bowl-red-large": ("nesting_bowl", {"radius": 0.15, "height": 0.075, "mass": 0.6, "color": "red"}),
+    "bowl-green-medium": ("nesting_bowl", {"radius": 0.10, "height": 0.06, "mass": 0.35, "color": "green"}),
+    "bowl-blue-small": ("nesting_bowl", {"radius": 0.06, "height": 0.045, "mass": 0.18, "color": "blue"}),
     "wine-glass": ("wine_glass", {}),
     "black-mug": ("mug", {"color": "black"}),
     "teddy-bear": ("teddy_bear", {}),

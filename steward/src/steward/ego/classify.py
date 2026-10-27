@@ -22,7 +22,7 @@ SHAPES: dict[str, dict] = {
     "cabinet": {"dims": (0.62, 0.52, 0.80), "floor": True},
     "chair": {"dims": (0.47, 0.46, 0.90), "floor": True},
     "drawer": {"dims": (0.56, 0.44, 0.22), "floor": False, "min_bottom": 0.35},
-    "bowl": {"dims": (0.17, 0.17, 0.06), "scale": (0.7, 1.35), "floor": False},
+    "bowl": {"dims": (0.17, 0.17, 0.06), "scale": (0.65, 1.85), "floor": False},
     "cup": {"dims": (0.08, 0.08, 0.10), "floor": False},
     "plate": {"dims": (0.24, 0.24, 0.02), "floor": False},
     "wine_glass": {"dims": (0.08, 0.08, 0.19), "floor": False, "color": "clear"},
