@@ -6,6 +6,11 @@ associates ES entities to World State entities (or environment links) by nearest
 bounding box center within a gate, ignoring category so that category accuracy can be measured,
 then reports recall, false positives, position error, NEES and self-localisation error. Results
 never flow back to robots.
+
+Gross perception faults are watched for on every snapshot: a large ES object with no counterpart
+in the world (a phantom, such as a concave wall corner filled in as a solid box) and the robot
+standing inside an ES object. A fault seen in ``ANOMALY_REPEATS`` snapshots in a row is reported
+once to ``on_anomaly`` with an analysis of what the world really holds there.
 """
 
 from __future__ import annotations
@@ -21,9 +26,18 @@ from steward.math3d import yaw_from_quat
 from steward.scene.validate import validate_ego
 
 
+PHANTOM_FOOTPRINT_M = 1.0
+ANOMALY_REPEATS = 3
+NAMES_ZH = {"wall": "墙", "table": "餐桌", "counter": "操作台", "cabinet": "柜子", "sideboard": "餐边柜", "chair": "椅子",
+            "bowl": "碗", "mug": "咖啡杯", "wine_glass": "高脚杯", "plate": "盘子", "drawer": "抽屉", "unknown": "未知物体"}
+
+
 class Observer:
-    def __init__(self, sim_provider, out_dir: Path | None = None, gate_m: float = 0.35, phase=None):
+    def __init__(self, sim_provider, out_dir: Path | None = None, gate_m: float = 0.35, phase=None, on_anomaly=None):
         self._sim = sim_provider
+        self.on_anomaly = on_anomaly
+        self._streaks: dict[str, int] = {}
+        self._reported: set[str] = set()
         self._phase = phase
         self.out_dir = out_dir
         self.gate_m = gate_m
@@ -108,6 +122,10 @@ class Observer:
             "wallsMatched": len(matches) - len(obj_matches),
             "matches": {e["id"]: g["id"] for e, g, _ in matches},
         })
+        anomalies = _anomalies(es_objs, {e["id"] for e, _, _ in matches}, gt, robot_pose)
+        if anomalies:
+            record["anomalies"] = [{k: a[k] for k in ("key", "kind", "entity")} for a in anomalies]
+        self._watch(robot_id, anomalies)
         me = next((e for e in ego["entities"] if e["id"] == ego.get("self")), None)
         if me is not None and robot_pose is not None:
             p, q = me["pose"]["value"]["p"], me["pose"]["value"]["q"]
@@ -116,6 +134,17 @@ class Observer:
             record["selfYawErrorRad"] = round(abs(dyaw), 4)
         self._store(robot_id, record)
         return record
+
+    def _watch(self, robot_id: str, anomalies: list[dict]) -> None:
+        """Count consecutive snapshots per fault and report each fault once when it persists."""
+        seen = {f"{robot_id}:{a['key']}": a for a in anomalies}
+        with self._lock:
+            self._streaks = {k: self._streaks.get(k, 0) + 1 for k in seen}
+            due = [a for k, a in seen.items() if self._streaks[k] >= ANOMALY_REPEATS and k not in self._reported]
+            self._reported.update(f"{robot_id}:{a['key']}" for a in due)
+        if self.on_anomaly is not None:
+            for anomaly in due:
+                self.on_anomaly(robot_id, anomaly)
 
     def _store(self, robot_id: str, record: dict) -> None:
         with self._lock:
@@ -131,6 +160,8 @@ class Observer:
             self.latest.clear()
             self.history.clear()
             self.latest_ego.clear()
+            self._streaks.clear()
+            self._reported.clear()
 
     def report(self) -> dict:
         with self._lock:
@@ -146,6 +177,60 @@ class Observer:
                     "maxRecall": max((h["recall"] or 0) for h in scored) if scored else None,
                 }
             return out
+
+
+def _box(ent: dict) -> tuple[list[float], list[float], float]:
+    size = ent["body"]["links"][0]["geometry"]["collision"][0]["size"]
+    return ent["pose"]["value"]["p"], size, yaw_from_quat(ent["pose"]["value"]["q"])
+
+
+def _within(centre: list[float], size: list[float], yaw: float, xy: list[float], margin: float = 0.0) -> bool:
+    c, s = math.cos(yaw), math.sin(yaw)
+    dx, dy = xy[0] - centre[0], xy[1] - centre[1]
+    return abs(c * dx + s * dy) <= size[0] / 2 + margin and abs(-s * dx + c * dy) <= size[1] / 2 + margin
+
+
+def _anomalies(es_objs: list[dict], matched: set[str], gt: list[dict], robot_pose: dict | None) -> list[dict]:
+    """Gross faults of one Ego-State against the world, each with an analysis for the operator."""
+    out = []
+    for ent in es_objs:
+        if ent.get("role") == "environment":
+            continue
+        centre, size, yaw = _box(ent)
+        cat = ent["category"]["value"]
+        name = f"{NAMES_ZH.get(cat, cat)} {ent['id']}"
+        footprint = max(size[0], size[1])
+        if robot_pose is not None and _within(centre, size, yaw, robot_pose["p"], -0.05):
+            out.append({"key": f"inside:{ent['id']}", "kind": "robot-inside", "entity": ent["id"],
+                        "message": f"机器人真实位置 ({robot_pose['p'][0]:.2f}, {robot_pose['p'][1]:.2f}) 落在 ES 的{name}内部",
+                        "analysis": f"机器人以为自己站在{name}（{size[0]:.2f}×{size[1]:.2f}×{size[2]:.2f} 米）里面，"
+                                    "导航与停靠规划会全部失败；" + _contents_analysis(centre, size, gt)})
+        if ent["id"] not in matched and footprint >= PHANTOM_FOOTPRINT_M:
+            out.append({"key": f"phantom:{ent['id']}", "kind": "phantom", "entity": ent["id"],
+                        "message": f"ES 的{name}（{size[0]:.2f}×{size[1]:.2f}×{size[2]:.2f} 米，在 ({centre[0]:.2f}, {centre[1]:.2f})）"
+                                   "在世界中没有对应物体",
+                        "analysis": _contents_analysis(centre, size, gt)})
+    return out
+
+
+def _contents_analysis(centre: list[float], size: list[float], gt: list[dict]) -> str:
+    """What the world really holds where an ES box is, and the likely cause of the box."""
+    inside = [g for g in gt if abs(g["center"][0] - centre[0]) <= (size[0] + g["size"][0]) / 2
+              and abs(g["center"][1] - centre[1]) <= (size[1] + g["size"][1]) / 2]
+    walls = [g for g in inside if g["env"]]
+    objects = [g for g in inside if not g["env"]]
+    names = "、".join(g["id"].removeprefix("w:") for g in inside) or "什么也没有"
+    if len(walls) >= 2:
+        cause = "两面墙在墙角的点云被并成了一个实心盒子：凹进去的墙角被当成了凸出的立方体"
+    elif walls and objects:
+        cause = "墙面的点云和旁边物体的点云被并成了一个盒子"
+    elif len(objects) >= 2:
+        cause = "几个相邻物体的点云被并成了一个盒子"
+    elif not inside:
+        cause = "深度噪声或错误关联生成了不存在的物体"
+    else:
+        cause = "这个物体的尺寸被严重高估"
+    return f"该范围内实际有：{names}。可能原因：{cause}。"
 
 
 def _brief(rec: dict | None) -> dict | None:

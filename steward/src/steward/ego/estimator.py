@@ -92,6 +92,9 @@ class EstimatorConfig:
     missed_decay: float = 0.97
     drop_below: float = 0.05
     max_range: float = 8.0
+    wall_like_top: float = 1.25
+    """Robot knowledge of the home: nothing but walls reaches this high, so a region topping it is
+    part of a wall whatever its own classification says, and a non-wall track this tall is not real."""
 
 
 @dataclass
@@ -194,8 +197,9 @@ class EgoEstimator:
         for seg in segments(frame, cam, rng=self._rng):
             centre, size, yaw = box_of(seg.points)
             probs = classify(size, centre[2] - size[2] / 2, seg.color, seg.invalid_frac, bottom_seen=seg.bottom_seen)
+            footprint = float(max(size[0], size[1]))
             measurements.append({"seg": seg, "centre": centre, "size": size, "yaw": yaw, "probs": probs,
-                                 "footprint": float(max(size[0], size[1]))})
+                                 "footprint": footprint, "concave": _concave(seg.points, centre, footprint, cam_p)})
         pairs = []
         held = self.tracks.get(self.held_id) if self.held_id else None
         for i, m in enumerate(measurements):
@@ -225,8 +229,8 @@ class EgoEstimator:
                     continue  # partial views only shrink a well-seen object; a much larger region is something else
                 if not track.held and not part_of_large and self._contradicts(track, m):
                     continue
-                if (track.category == "wall") != (m["probs"].get("wall", 0.0) > 0.5) and \
-                        (track.footprint > 0.3 or m["footprint"] > 0.3):
+                wall_like = m["probs"].get("wall", 0.0) > 0.5 or m_top >= self.config.wall_like_top or m["concave"]
+                if (track.category == "wall") != wall_like and (track.footprint > 0.3 or m["footprint"] > 0.3):
                     continue  # walls only join walls
                 if not track.held and track.settled and track.footprint < 0.3 and track.observations > 2 \
                         and not (track.bottom() - 0.03 <= m_bottom <= track.bottom() + 0.06):
@@ -245,15 +249,35 @@ class EgoEstimator:
         for i, m in enumerate(measurements):
             # A region cut by the image border is only part of something and waits for a full view,
             # except a wall: a near wall always fills the image edge to edge.
-            if i not in used and (not m["seg"].border or m["probs"].get("wall", 0.0) >= 0.5):
+            is_wall = m["probs"].get("wall", 0.0) >= 0.5
+            if m["concave"] and not is_wall:
+                continue  # the inside of a corner is room, not a solid object
+            if i not in used and (not m["seg"].border or is_wall):
                 track = self._new_cloud_track(m, cam_p)
                 matched.add(track.id)
         self._decay_unseen_rgbd(cam, matched, frame)
         self._merge_parts(cam_p)
         self._merge_same_surface(cam_p)
         self._merge_walls(cam_p)
+        self._drop_impossible(cam_p)
         self._follow_held()
         self.version += 1
+
+    def _drop_impossible(self, cam_p: np.ndarray) -> None:
+        """Remove tracks that cannot be solid objects: one whose surfaces lie behind its own box
+        centre as seen from the camera (a concave corner of the room boxed as if it were a convex
+        block), one whose footprint holds the robot's base (the robot stands there), and a non-wall
+        track as tall as a wall (wall pieces swept into it). Such boxes would otherwise fill the
+        room's corners, hide the objects in them and block every path."""
+        base = np.array([self.odometry["x"], self.odometry["y"], 0.0])
+        for track in list(self.tracks.values()):
+            if track.held or track.category == "wall":
+                continue
+            holds_robot = _inside(track, base, -0.05) and track.bottom() < 1.0
+            wall_tall = track.top() >= self.config.wall_like_top and track.footprint >= 0.5
+            hollow = track.voxels is not None and _concave(_points(track.voxels), track.pos, track.footprint, cam_p)
+            if holds_robot or wall_tall or hollow:
+                del self.tracks[track.id]
 
     def _decay_unseen_rgbd(self, cam: dict, matched: set[str], frame: dict) -> None:
         """Lower the existence of tracks that should be in view but were not segmented: their centre
@@ -398,12 +422,16 @@ class EgoEstimator:
             return
         track.settled = True
         track.recent.append((np.asarray(m["centre"], float).copy(), np.asarray(m["size"], float).copy()))
-        if track.observations > 2 and track.voxels is not None:
-            grown = box_of(np.vstack([_points(track.voxels), seg.points]))[1]
-            if max(grown[0], grown[1]) > 1.5 * max(track.footprint, 0.05) and track.footprint < 0.3:
+        if track.voxels is not None:
+            union = np.vstack([_points(track.voxels), seg.points])
+            centre, grown, yaw = box_of(union)
+            if track.observations > 2 and max(grown[0], grown[1]) > 1.5 * max(track.footprint, 0.05) and track.footprint < 0.3:
                 return  # the region would swell an established box: not this object's surface
             if track.category == "wall" and min(grown[0], grown[1]) > 0.35:
                 return  # a second wall around a corner, not this wall
+            if max(grown[0], grown[1]) > CONVEX_CHECK_M and _footprint_fill(union, centre, grown, yaw) < MIN_FOOTPRINT_FILL:
+                return  # the points would outline an L or a hollow (two walls at a corner), which no single
+                # box describes: filled in, the concave corner would become a solid cube
         points = seg.points
         if len(points) > self.config.points_per_cloud:
             points = points[self._rng.choice(len(points), self.config.points_per_cloud, replace=False)]
@@ -812,6 +840,8 @@ def color_name(rgb: np.ndarray, invalid_frac: float = 0.0) -> str:
 
 VOXEL = 0.01
 ESTABLISHED_VIEWS = 5
+CONVEX_CHECK_M = 0.8  # boxes longer than this are checked for being filled rather than an outline
+MIN_FOOTPRINT_FILL = 0.2
 SMALL_M = 0.3
 RECENT_VIEWS = 12
 
@@ -844,6 +874,40 @@ def _to_local_xy(track: Track, point: np.ndarray) -> tuple[float, float]:
 def _sigma_z(a: Track, b: Track) -> float:
     """Standard deviation of the height difference between two tracks."""
     return math.sqrt(float(a.var[2] + b.var[2]))
+
+
+CONCAVE_MIN_M = 0.5
+SEE_THROUGH_DEG = 5.0
+SEE_THROUGH_M = 0.15
+
+
+def _concave(points: np.ndarray, centre: np.ndarray, footprint: float, cam_p: np.ndarray) -> bool:
+    """Whether the box drawn around a large region is seen through: the surfaces the camera sees in
+    the direction of the box centre lie beyond that centre. A solid block shows its near face there,
+    in front of the centre; the corner where two walls meet, boxed as if it were a block, shows the
+    walls behind it, because the box's inside is open room."""
+    if footprint < CONCAVE_MIN_M or len(points) < 10:
+        return False
+    to_centre = centre[:2] - cam_p[:2]
+    middle = float(np.linalg.norm(to_centre))
+    if middle < 1e-3:
+        return False
+    rel = points[:, :2] - cam_p[:2]
+    bearing = np.degrees(np.abs(np.arctan2(rel[:, 1], rel[:, 0]) - math.atan2(to_centre[1], to_centre[0])))
+    bearing = np.minimum(bearing, 360.0 - bearing)
+    along = np.linalg.norm(rel[bearing <= SEE_THROUGH_DEG], axis=1)
+    return len(along) >= 5 and float(np.median(along)) > middle + SEE_THROUGH_M
+
+
+def _footprint_fill(points: np.ndarray, centre: np.ndarray, size: np.ndarray, yaw: float, cell: float = 0.05) -> float:
+    """Share of a box's footprint (in ``cell``-sized squares) that the points cover seen from above."""
+    c, s = math.cos(yaw), math.sin(yaw)
+    rel = points[:, :2] - centre[:2]
+    lx, ly = rel[:, 0] * c + rel[:, 1] * s, -rel[:, 0] * s + rel[:, 1] * c
+    nx, ny = max(1, math.ceil(size[0] / cell)), max(1, math.ceil(size[1] / cell))
+    ix = np.clip(((lx + size[0] / 2) / cell).astype(int), 0, nx - 1)
+    iy = np.clip(((ly + size[1] / 2) / cell).astype(int), 0, ny - 1)
+    return len(set(zip(ix.tolist(), iy.tolist(), strict=True))) / (nx * ny)
 
 
 def _footprint_inside(track: Track, m: dict, margin: float) -> bool:

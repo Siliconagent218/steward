@@ -69,6 +69,7 @@ def console_state(host) -> dict:
         "holding": status["robots"],
         "events": status["events"],
         "robots": robots,
+        "perceptionAlerts": host.active_perception_alerts(),
     }
 
 

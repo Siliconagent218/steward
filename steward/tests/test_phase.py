@@ -208,3 +208,52 @@ def test_an_established_piece_of_furniture_is_not_folded_into_a_larger_track_of_
     est._merge_parts(np.array([0.0, -2.0, 1.2]))
     assert "e:16" in est.tracks, "the sideboard stays its own object"
     assert "e:20" not in est.tracks, "a fragment seen twice is still folded in"
+
+
+def test_tracks_the_robot_stands_in_or_wall_tall_non_walls_are_dropped():
+    from steward.assets.generators import steward_bot
+    from steward.ego.estimator import EgoEstimator, Track
+
+    est = EgoEstimator(robot_model=steward_bot().to_dict())
+    est.odometry = {"x": -1.5, "y": -1.24, "yaw": 0.0}
+
+    def track(oid, cat, pos, size):
+        return Track(id=oid, category_counts={cat: 5.0}, pos=np.array(pos), var=np.full(3, 1e-4), yaw=0.0, yaw_var=1e-3,
+                     size=np.array(size), observations=8, first_seen=0.0, last_seen=0.0, existence=1.0)
+
+    for t in (track("e:398", "unknown", [-2.11, -1.83, 0.74], [1.9, 1.48, 1.48]),   # wall corner and chair, around the robot
+              track("e:2126", "unknown", [-2.75, 1.56, 0.74], [2.76, 1.33, 1.48]),  # wall pieces in front of the sideboard
+              track("e:6", "table", [0.6, -0.9, 0.38], [1.19, 0.8, 0.76]),
+              track("e:12", "wall", [-0.1, 2.5, 0.74], [5.7, 0.07, 1.48])):
+        est.tracks[t.id] = t
+    est._drop_impossible(np.array([0.0, 0.0, 1.4]))
+    assert sorted(est.tracks) == ["e:12", "e:6"]
+
+
+def test_a_room_corner_seen_from_inside_is_concave_and_a_cabinet_front_is_not():
+    from steward.ego.estimator import _concave
+    from steward.ego.perception import box_of
+
+    cam = np.array([0.0, 0.0, 1.4])
+    rng = np.random.default_rng(1)
+    z = rng.uniform(0.0, 1.48, 400)
+    # Two walls meeting at (-3, -2.5), seen from the room centre: an L of points around the corner.
+    left = np.stack([np.full(200, -3.0), rng.uniform(-2.5, -1.0, 200), z[:200]], axis=1)
+    back = np.stack([rng.uniform(-3.0, -1.5, 200), np.full(200, -2.5), z[200:]], axis=1)
+    corner = np.vstack([left, back])
+    centre, size, _ = box_of(corner)
+    assert _concave(corner, centre, float(max(size[:2])), cam)
+    # The front and top of a cabinet facing the camera: the surfaces lie in front of its centre.
+    front = np.stack([np.full(200, 2.4), rng.uniform(0.3, 0.9, 200), rng.uniform(0.0, 0.8, 200)], axis=1)
+    top = np.stack([rng.uniform(2.4, 2.95, 200), rng.uniform(0.3, 0.9, 200), np.full(200, 0.8)], axis=1)
+    cabinet = np.vstack([front, top])
+    centre, size, _ = box_of(cabinet)
+    assert not _concave(cabinet, centre, float(max(size[:2])), cam)
+
+    # A table seen from its long side: the top and the legs spread around the centre, not behind it.
+    top_t = np.stack([rng.uniform(0.0, 1.2, 300), rng.uniform(-1.3, -0.5, 300), np.full(300, 0.75)], axis=1)
+    legs = np.vstack([np.stack([np.full(40, x), np.full(40, y), rng.uniform(0.0, 0.73, 40)], axis=1)
+                      for x in (0.03, 1.17) for y in (-1.27, -0.53)])
+    table = np.vstack([top_t, legs])
+    centre, size, _ = box_of(table)
+    assert not _concave(table, centre, float(max(size[:2])), cam)

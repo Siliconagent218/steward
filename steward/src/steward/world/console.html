@@ -501,6 +501,8 @@ async function refresh() {
     if (key !== viewKey) { viewKey = key; view = presetView('south'); panes.world.rendered = panes.ego.rendered = null;
       postView(); document.querySelectorAll('[data-view]').forEach(b => b.classList.toggle('on', b.dataset.view === 'south')); }
     $('clock').textContent = `t = ${state.t.toFixed(1)} s`;
+    perceptionAlerts = state.perceptionAlerts || [];
+    renderAlerts();
     renderPhase(state.phase);
     $('task').textContent = state.task ? `任务：${state.task}` : '';
     $('pause').textContent = state.paused ? '继续' : '暂停';
@@ -683,12 +685,16 @@ function renderStatus() {
 }
 let shownAlerts = [];
 const ALERT_SOURCES = { agent: '机器人智能体报告', skill: '技能执行异常', runtime: '感知异常', api: 'Ego API 异常',
-  harness: 'Ego Harness 运行失败', mission: '家务任务卡住' };
+  harness: 'Ego Harness 运行失败', mission: '家务任务卡住', monitor: '世界侧感知监测（与真实状态对比）' };
+let robotAlerts = [], perceptionAlerts = [];
 const dismissedAlerts = new Set();
-function renderAlerts(alerts) {
+function renderAlerts() {
   // The alert sits in the status card below the Ego view (never over the render); the view's
-  // outline flashes while one is unacknowledged.
-  alerts = alerts.filter(a => !dismissedAlerts.has(a.id));
+  // outline flashes while one is unacknowledged. Perception faults found by comparing the Ego
+  // State with the World State join the robot's own alerts.
+  const faults = perceptionAlerts.map(a => ({ id: `p${a.id}`, source: 'monitor', message: a.message, diagnosis: a.analysis,
+    count: 1, goal: '', step: '' }));
+  const alerts = [...robotAlerts, ...faults].filter(a => !dismissedAlerts.has(a.id));
   shownAlerts = alerts;
   const box = $('egoAlert');
   $('vpEgo').classList.toggle('alerting', alerts.length > 0);
@@ -772,7 +778,8 @@ function renderRobotStatus(chat) {
 async function refreshChat() {
   try {
     chatState = await api('GET', `/console/chat?activity=${activityLast}`);
-    renderAlerts((chatState.agents.robot && chatState.agents.robot.alerts) || []);
+    robotAlerts = (chatState.agents.robot && chatState.agents.robot.alerts) || [];
+    renderAlerts();
     renderRobotStatus(chatState);
     renderPlan(chatState);
     renderStatus();
@@ -799,7 +806,8 @@ $('chatInput').addEventListener('keydown', (e) => {
 document.querySelectorAll('[data-target]').forEach(b => b.onclick = () => { chatTarget = b.dataset.target; chatSig = ''; renderTarget(); refreshChat(); });
 $('egoAlertAck').onclick = async () => {
   for (const a of shownAlerts) dismissedAlerts.add(a.id);
-  renderAlerts([]);
+  robotAlerts = []; perceptionAlerts = [];
+  renderAlerts();
   try { await api('POST', '/console/alerts/ack'); refreshChat(); } catch (e) { showError(e); }
 };
 $('chatStop').onclick = async () => { try { await api('POST', '/console/chat/stop', { agent: chatTarget }); refreshChat(); } catch (e) { showError(e); } };

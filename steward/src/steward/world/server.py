@@ -54,7 +54,8 @@ class _MainTask:
 class StewardHost:
     def __init__(self, root: Path | str, *, scenario: str | None = None, speed: float = 1.0, seed: int = 0,
                  run_dir: Path | None = None, wca_port: int = 0, robot_ports: dict[str, int] | None = None,
-                 chat: ChatConfig | None = None, phase: str = DEFAULT_PHASE, bind_wait_s: float = 0.0):
+                 chat: ChatConfig | None = None, phase: str = DEFAULT_PHASE, bind_wait_s: float = 0.0,
+                 pause_on_perception_fault: bool = False):
         phase_modules(phase)
         self.phase = phase
         self.authoring = AuthoringService(root)
@@ -64,7 +65,11 @@ class StewardHost:
         self.run_dir = run_dir
         self.sim: WorldSim | None = None
         self.scenario: dict | None = None
-        self.observer = Observer(self._require_sim, run_dir, phase=lambda: self.phase)
+        self.observer = Observer(self._require_sim, run_dir, phase=lambda: self.phase, on_anomaly=self._perception_fault)
+        self.pause_on_perception_fault = pause_on_perception_fault
+        self.perception_alerts: list[dict] = []
+        self._paused_by_monitor = False
+        self._alert_lock = threading.Lock()
         self.bind_wait_s = bind_wait_s
         self.wca = JsonServer(self._wca_routes(), port=wca_port, name="wca", bind_wait_s=bind_wait_s)
         self._robot_port_config = robot_ports or {}
@@ -280,8 +285,40 @@ class StewardHost:
             ("POST", "/console/chat"): guard(lambda q, b: self.chat.send(b.get("agent", "world"), b.get("message", ""))),
             ("POST", "/console/chat/reset"): guard(lambda q, b: self.chat.reset(b.get("agent", "world"))),
             ("POST", "/console/chat/stop"): guard(lambda q, b: self.chat.cancel(b.get("agent", "world"))),
-            ("POST", "/console/alerts/ack"): guard(lambda q, b: self.chat.acknowledge_alerts()),
+            ("POST", "/console/alerts/ack"): guard(lambda q, b: self.acknowledge_alerts()),
         }
+
+    # ------------------------------------------------- perception fault monitor
+    def _perception_fault(self, robot: str, anomaly: dict) -> None:
+        """A gross perception fault the Observer found: alert the operator and, when configured,
+        pause the world so the robot does not act on a badly wrong Ego-State."""
+        sim = self.sim
+        with self._alert_lock:
+            record = {"id": len(self.perception_alerts) + 1, "t": round(sim.time, 2) if sim else 0.0, "robot": robot,
+                      "kind": anomaly["kind"], "message": anomaly["message"], "analysis": anomaly["analysis"],
+                      "acknowledged": False}
+            self.perception_alerts.append(record)
+        if sim is not None:
+            sim.events.append({"t": sim.time, "type": "observer/perception-fault", "robot": robot, "kind": anomaly["kind"],
+                               "entity": anomaly["entity"]})
+            if self.pause_on_perception_fault and not sim.paused:
+                sim.paused = True
+                self._paused_by_monitor = True
+
+    def active_perception_alerts(self) -> list[dict]:
+        with self._alert_lock:
+            return [dict(a) for a in self.perception_alerts if not a["acknowledged"]]
+
+    def acknowledge_alerts(self) -> dict:
+        """Acknowledge robot alerts and perception-fault alerts; a world paused by the monitor resumes."""
+        with self._alert_lock:
+            for record in self.perception_alerts:
+                record["acknowledged"] = True
+        if self._paused_by_monitor and self.sim is not None:
+            self.sim.paused = False
+            self._paused_by_monitor = False
+        robot = self.chat.acknowledge_alerts() if self.chat.config and self.chat.config.ego_api else {}
+        return {"robot": robot, "perception": self.active_perception_alerts()}
 
     # ------------------------------------------------------------------ views
     def set_view(self, body: dict) -> dict:

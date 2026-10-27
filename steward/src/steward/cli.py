@@ -61,7 +61,8 @@ def _host(args, run_dir: Path):
     ports = {"w:robot-1": args.robot_port} if getattr(args, "robot_port", 0) else {}
     return StewardHost(args.root, scenario=args.scenario, speed=args.speed, seed=args.seed, run_dir=run_dir,
                        wca_port=args.wca_port, robot_ports=ports, chat=_chat_config(args),
-                       phase=args.phase, bind_wait_s=getattr(args, "bind_wait", 0.0)).start()
+                       phase=args.phase, bind_wait_s=getattr(args, "bind_wait", 0.0),
+                       pause_on_perception_fault=getattr(args, "pause_on_perception_fault", False)).start()
 
 
 def _chat_config(args):
@@ -439,6 +440,9 @@ def main(argv: list[str] | None = None) -> int:
         if not in_process:
             p.add_argument("--bind-wait", type=float, default=10.0,
                            help="seconds to wait for a fixed port still held by a service that just stopped")
+            p.add_argument("--pause-on-perception-fault", action=argparse.BooleanOptionalAction, default=True,
+                           help="pause the world when the Observer finds a gross perception fault (phantom object, "
+                                "robot inside an object) until the operator acknowledges the alert")
             p.add_argument("--world-harness", default=str(STEWARD_DIR / "var" / "dsh" / "world"),
                            help="DSH home of the World Harness used by the console chat; '' disables it")
             p.add_argument("--robot-harness", default=str(STEWARD_DIR / "var" / "dsh" / "robot-1"),

@@ -45,6 +45,7 @@ COLOR_RGB = {
     "white": [0.93, 0.93, 0.94], "clear": [0.80, 0.92, 0.98], "yellow": [0.90, 0.85, 0.20],
 }
 DEFAULT_RGB = [0.62, 0.68, 0.75]
+UNKNOWN_ALPHA = 0.3
 FLOOR_ID = "e:render-floor"
 SLOT_MIN = 32
 HIDDEN_GROUP = 4  # not drawn by MuJoCo's default visualisation options
@@ -73,6 +74,8 @@ def ego_render_scene(ego: dict, toward_camera: np.ndarray, room_center: list[flo
             seen = (ent.get("stateVars", {}).get("color") or {}).get("value")
             rgb = COLOR_RGB.get(seen) or CATEGORY_RGB.get(ent["category"]["value"], DEFAULT_RGB)
             alpha = 1.0 if ent["role"] == "environment" else 0.35 + 0.65 * float(ent.get("existence", 1.0))
+            if ent["category"]["value"] == "unknown":
+                alpha = min(alpha, UNKNOWN_ALPHA)  # something unidentified must not hide what is behind it
             for link in ent["body"]["links"]:
                 for geom in link["geometry"].get("collision", []):
                     geom["rgba"] = [*rgb, alpha]
