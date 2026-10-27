@@ -34,6 +34,9 @@ SHAPES: dict[str, dict] = {
 UNDER = (0.55, 1.2, 0.55)  # tolerance (log ratio) per axis for measuring less than the prototype; the
 # short side is usually the depth seen from the front, so it may come out much thinner
 OVER = 0.25  # tolerance for measuring more (1 cm voxels, depth noise, overhangs)
+UNKNOWN = "unknown"
+UNKNOWN_COST = 7.0  # a region that fits no prototype this badly is something the robot has no prior for;
+# one broken placement rule (6) on an otherwise fitting shape still names the category
 
 
 def _color_score(rule: str | None, color: np.ndarray, invalid_frac: float) -> float:
@@ -52,7 +55,7 @@ def _color_score(rule: str | None, color: np.ndarray, invalid_frac: float) -> fl
 def classify(size: np.ndarray, bottom: float, color: np.ndarray, invalid_frac: float = 0.0,
              temperature: float = 1.0) -> dict[str, float]:
     """Probability per category for a measured box (full extents, long side first) whose lowest
-    point is ``bottom`` metres above the floor."""
+    point is ``bottom`` metres above the floor; :data:`UNKNOWN` takes the mass when no prototype fits."""
     obs = np.array([max(size[0], size[1]), min(size[0], size[1]), size[2]], float)
     obs = np.maximum(obs, 0.004)
     scores = {}
@@ -60,11 +63,12 @@ def classify(size: np.ndarray, bottom: float, color: np.ndarray, invalid_frac: f
     for name, shape in SHAPES.items():
         proto = np.array(shape["dims"], float)
         lo, hi = shape.get("scale", (1.0, 1.0))
+        # One scale for the whole object, set by the axis that fills the prototype most: a partial
+        # view only shrinks the other axes, which costs little, while a flat wide region cannot pass
+        # for a small deep object scaled per axis.
+        scale = min(max(float(np.max(obs / proto)), lo), hi)
         cost = 0.0
         for k in range(3):
-            # Best scale within the allowed range for this axis.
-            ratio = obs[k] / proto[k]
-            scale = min(max(ratio, lo), hi)
             r = math.log(obs[k] / (proto[k] * scale))
             cost += (r / UNDER[k]) ** 2 if r < 0 else (r / OVER) ** 2
         if shape["floor"] != on_floor:
@@ -75,6 +79,7 @@ def classify(size: np.ndarray, bottom: float, color: np.ndarray, invalid_frac: f
             cost += 6.0
         cost -= _color_score(shape.get("color"), color, invalid_frac)
         scores[name] = -cost / temperature
+    scores[UNKNOWN] = -UNKNOWN_COST / temperature
     top = max(scores.values())
     weights = {k: math.exp(v - top) for k, v in scores.items()}
     total = sum(weights.values())

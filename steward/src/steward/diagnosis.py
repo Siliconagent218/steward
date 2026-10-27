@@ -13,6 +13,7 @@ import re
 from collections import Counter
 from dataclasses import dataclass
 
+TABLEWARE = frozenset({"bowl", "cup", "mug", "plate", "wine_glass"})
 STATIONARY_M = 0.25
 TIGHT_M = 0.45
 LOW_CONFIDENCE = 0.55
@@ -34,6 +35,9 @@ CAUSES = (
     Cause("perception-missing", "感知缺失：需要的物体不在 Ego State 里",
           (r"no [\w ]+ in the ego state", r"no longer in the ego state", r"not seen", r"no drawer seen", r"pieces of tableware are known"),
           "到能看清目标的位置环顾；如果物体确实不在了，请操作员确认任务对象"),
+    Cause("out-of-reach", "目标够不着：位置超出手臂或升降范围",
+          (r"outside the lift range", r"out of range", r"too far"),
+          "确认目标确实是要操作的物体（地面上的扁平物体容易被误认成餐具），或换一个能够到的位置"),
     Cause("low-confidence", "感知不确定：目标的存在概率或位置不确定度过高",
           (r"existence probability", r"uncertainty", r"risk limit"), "靠近、换角度多看几帧再预测"),
     Cause("grasp-miss", "抓取未对准：物体或把手的位置估计有误差", (r"missed", r"not closing"),
@@ -96,6 +100,8 @@ def diagnose(failures: list[dict], summary: dict | None, needs: dict[str, int]) 
         findings.append("失败原因分布：" + "、".join(f"{by_key[k].label.split('：')[0]} ×{n}" for k, n in counts.most_common()))
     findings += _motion_findings(failures, summary)
     if summary is not None:
+        findings += _blocker_findings(failures, summary)
+        findings += _target_findings(failures, summary)
         findings += _ego_state_findings(summary, needs)
     return Diagnosis(by_key.get(top_key, UNKNOWN), explained, len(failures), tuple(findings))
 
@@ -115,6 +121,32 @@ def _motion_findings(failures: list[dict], summary: dict | None) -> list[str]:
         if close:
             out.append("机器人现在离 " + "、".join(f"{o['category']} {o['id']} {d:.2f} 米" for d, o in close[:3])
                        + "，周围空间很窄")
+    return out
+
+
+def _blocker_findings(failures: list[dict], summary: dict) -> list[str]:
+    """The entity that most often blocked a dock pose or a path."""
+    hits = Counter(oid for f in failures for oid in
+                   re.findall(r"(?:collides with|blocked by) (e:\d+)|(e:\d+) \(\w+\) is in the way", f["message"])
+                   for oid in oid if oid)
+    if not hits:
+        return []
+    oid, n = hits.most_common(1)[0]
+    obj = next((o for o in summary["objects"] if o["id"] == oid), None)
+    name = f"{obj['category']} {oid}" if obj else f"{oid}（已不在 Ego State 里）"
+    return [f"停靠位或路径 {n} 次被 {name} 挡住"]
+
+
+def _target_findings(failures: list[dict], summary: dict) -> list[str]:
+    """Objects the failed actions worked on that look implausible for their category."""
+    ids = dict.fromkeys(oid for f in failures for oid in re.findall(r"e:\d+", f.get("step") or ""))
+    out = []
+    for obj in (o for o in summary["objects"] if o["id"] in ids):
+        e = obj.get("extentM") or obj["sizeM"]
+        bottom = obj["position"][2] - e[2] / 2
+        if obj["category"] in TABLEWARE and bottom < 0.05:
+            out.append(f"操作目标 {obj['category']} {obj['id']} 在地面上（高 {e[2]:.2f} 米、底部离地 {max(bottom, 0.0):.2f} 米），"
+                       "可能是把地面上的扁平物体误认成了餐具")
     return out
 
 

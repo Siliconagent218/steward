@@ -13,6 +13,7 @@ from steward.diagnosis import classify_failure, diagnose
     ("pick stayed above the risk limit: 0.77 ['target existence probability is only 0.23']", "low-confidence"),
     ("open failed: missed the handle of e:17", "grasp-miss"),
     ("navigate failed: turn did not converge (yaw error 0.14 rad)", "base-blocked"),
+    ("pick infeasible: ['height 0.03 m is outside the lift range [0.32, 1.28]']", "out-of-reach"),
     ("place failed: joint lift did not reach 0.836 (at 0.945)", "arm-blocked"),
     ("e:91 (chair) is in the way and there is no free spot to move it to", "no-space"),
     ("cannot open e:10: ['dock pose in front of e:10 collides with e:5']", "path-blocked"),
@@ -49,3 +50,19 @@ def test_diagnosis_names_the_dominant_cause_and_flags_duplicate_and_doubtful_tra
 def test_diagnosis_works_from_the_failure_log_alone():
     diagnosis = diagnose([{"message": "navigate failed: base is blocked", "pose": None}], None, {"table": 1})
     assert diagnosis.cause.key == "base-blocked" and "依据" not in diagnosis.text
+
+
+def test_diagnosis_names_the_repeated_blocker_and_tableware_lying_on_the_floor():
+    summary = {"self": {"x": 0.0, "y": 0.0, "yawDeg": 0.0, "holding": None}, "objects": [
+        _obj("e:7", "table", (1.0, -1.9), [1.2, 0.8, 0.75]),
+        {**_obj("e:16", "bowl", (2.0, -1.9), [0.25, 0.24, 0.03]), "position": [2.0, -1.9, 0.015]},
+    ]}
+    failures = [
+        {"step": "把white bowl e:16 放到餐桌第 1 位", "pose": [0.0, 0.0],
+         "message": "pick infeasible: ['no feasible approach: side (-1.0, 0.0): dock pose collides with e:7; side (0.0, 1.0): dock pose collides with e:7']"},
+        {"step": "把white碗 e:16 放到餐边柜上作叠放底座", "pose": [1.5, 1.3],
+         "message": "pick infeasible: ['height 0.03 m is outside the lift range [0.32, 1.28]']"},
+    ]
+    text = diagnose(failures, summary, {"table": 1}).text
+    assert "停靠位或路径 2 次被 table e:7 挡住" in text
+    assert "操作目标 bowl e:16 在地面上" in text and "误认成了餐具" in text
