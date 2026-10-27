@@ -13,6 +13,7 @@ nearly ideal; the Observer still estimates the alignment explicitly.
 
 from __future__ import annotations
 
+import collections
 import copy
 import itertools
 import math
@@ -52,6 +53,8 @@ class Track:
     mean_rgb: np.ndarray | None = None  # running mean colour of its regions (RGB-D mode)
     mean_invalid: float = 0.0  # running mean share of its pixels without depth
     bottom_seen: bool = False  # some view showed its base (not cut by the image edge or hidden)
+    recent: collections.deque = field(default_factory=lambda: collections.deque(maxlen=RECENT_VIEWS))
+    # (centre, size) of its latest single-view measurements, for the robust box of small objects
 
     @property
     def category(self) -> str:
@@ -391,6 +394,7 @@ class EgoEstimator:
         if track.held:
             return
         track.settled = True
+        track.recent.append((np.asarray(m["centre"], float).copy(), np.asarray(m["size"], float).copy()))
         if track.observations > 2 and track.voxels is not None:
             grown = box_of(np.vstack([_points(track.voxels), seg.points]))[1]
             if max(grown[0], grown[1]) > 1.5 * max(track.footprint, 0.05) and track.footprint < 0.3:
@@ -440,8 +444,14 @@ class EgoEstimator:
 
     def _rebuild_geometry(self, track: Track, cam_p: np.ndarray, rng_m: float) -> None:
         """Box from the accumulated points, completed with the category's prior size along the
-        directions not yet seen; the variance shrinks with views and grows with completion."""
+        directions not yet seen; the variance shrinks with views and grows with completion. A small
+        object, which every view shows almost whole, takes the median of its recent single-view
+        boxes instead: a union of views swells when a merged duplicate or a stray view sits a few
+        centimetres off, enough to turn a mug into a bowl."""
         centre, size, yaw = box_of(_points(track.voxels), trim=0.01)
+        if max(size[0], size[1]) < SMALL_M and len(track.recent) >= 3:
+            centre = np.median([c for c, _ in track.recent], axis=0)
+            size = np.median([z for _, z in track.recent], axis=0)
         parent = self._furniture_of(track) if track.category == "drawer" else None
         if parent is not None:
             # A drawer slides square to its furniture: take the furniture's (well-observed) heading.
@@ -633,6 +643,7 @@ class EgoEstimator:
         track = self.tracks[track_id]
         track.held = True
         track.held_offset = track.pos - self.gripper_position()
+        track.recent.clear()  # it will be put down elsewhere
         self.held_id = track_id
 
     def _clear_held(self) -> None:
@@ -770,6 +781,10 @@ _COLORS = {"red": (0.85, 0.15, 0.15), "green": (0.15, 0.70, 0.25), "blue": (0.15
            "brown": (0.58, 0.40, 0.24), "beige": (0.80, 0.67, 0.50), "yellow": (0.90, 0.85, 0.20)}
 
 
+ACHROMATIC_SATURATION = 0.18
+_CHROMATIC = {k: v for k, v in _COLORS.items() if k not in ("black", "white", "gray")}
+
+
 def color_name(rgb: np.ndarray, invalid_frac: float = 0.0) -> str:
     """Nearest named colour of a measured mean colour; surfaces without depth readings that look
     pale are reported as clear."""
@@ -777,9 +792,13 @@ def color_name(rgb: np.ndarray, invalid_frac: float = 0.0) -> str:
     value, low = float(rgb.max()), float(rgb.min())
     if invalid_frac > 0.15 and value > 0.55 and (value - low) / max(value, 1e-6) < 0.25:
         return "clear"
+    if (value - low) / max(value, 1e-6) < ACHROMATIC_SATURATION:
+        # Without hue, brightness alone tells black, gray and white apart (scaling a reference to the
+        # measured brightness, as for hues below, would make all three the same).
+        return "black" if value < 0.2 else "gray" if value < 0.55 else "white"
     # Lighting darkens surfaces: compare chromaticity scaled to the measured brightness.
     best, best_d = "gray", math.inf
-    for name, ref in _COLORS.items():
+    for name, ref in _CHROMATIC.items():
         ref = np.asarray(ref)
         scale = max(value, 1e-3) / max(float(ref.max()), 1e-3)
         d = float(np.sum((rgb - ref * min(scale, 1.4)) ** 2))
@@ -789,6 +808,8 @@ def color_name(rgb: np.ndarray, invalid_frac: float = 0.0) -> str:
 
 
 VOXEL = 0.01
+SMALL_M = 0.3
+RECENT_VIEWS = 12
 
 
 def _voxelize(points: np.ndarray) -> np.ndarray:

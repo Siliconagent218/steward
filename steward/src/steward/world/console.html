@@ -215,7 +215,8 @@ const COLORS = { table: '#c9a46b', counter: '#8a6a4a', cabinet: '#a07850', sideb
 const NAMES = { table: '餐桌', counter: '操作台', cabinet: '柜子', sideboard: '餐边柜', cup: '杯子', bowl: '碗',
   plate: '盘子', 'steward-bot': '机器人', drawer: '抽屉', wine_glass: '高脚杯', mug: '咖啡杯', teddy_bear: '玩具熊',
   scissors: '剪刀' };
-const COLOR_NAMES = { red: '红', green: '绿', blue: '蓝', black: '黑', clear: '透明' };
+const COLOR_NAMES = { red: '红', green: '绿', blue: '蓝', black: '黑', white: '白', gray: '灰', clear: '透明' };
+const TABLEWARE = new Set(['bowl', 'cup', 'mug', 'plate', 'wine_glass']);
 const RENDER_W = 1024, RENDER_H = 768;
 let state = null, robotId = null, view = null, viewKey = '';
 const panes = {
@@ -383,7 +384,7 @@ function drawEgoOverlay() {
     }
     if ($('showEgoLabels').checked) {
       const conf = o.existence < 0.99 ? `  存在 ${(o.existence * 100).toFixed(0)}%` : '';
-      const tint = o.color && COLOR_NAMES[o.color] && o.category === 'bowl' ? COLOR_NAMES[o.color] : '';
+      const tint = o.color && COLOR_NAMES[o.color] && TABLEWARE.has(o.category) ? COLOR_NAMES[o.color] : '';
       p.text([o.center[0], o.center[1], o.center[2] + o.size[2] / 2 + 0.1], `${tint}${label(o.category, o.id)}${conf}`, '#ffd2a6');
     }
   }

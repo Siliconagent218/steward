@@ -161,3 +161,29 @@ def test_a_partial_view_without_its_base_is_classified_by_its_visible_top():
     assert max(hidden_wall, key=hidden_wall.get) == "wall"
     floating = classify([1.2, 0.8, 0.30], 0.45, [0.8, 0.7, 0.5])
     assert floating.get("table", 0.0) < 0.2, "a base in view that is off the floor is not a table"
+
+
+def test_achromatic_colours_are_named_by_brightness_and_hues_by_chromaticity():
+    from steward.ego.estimator import color_name
+
+    names = [color_name(np.array(rgb)) for rgb in ([0.06, 0.05, 0.06], [0.45, 0.46, 0.47], [0.86, 0.86, 0.87],
+                                                    [0.7, 0.15, 0.15], [0.12, 0.25, 0.7])]
+    assert names == ["black", "gray", "white", "red", "blue"]
+
+
+def test_a_small_object_keeps_its_single_view_size_when_views_of_it_disagree():
+    from steward.assets.generators import steward_bot
+    from steward.ego.estimator import EgoEstimator, Track
+
+    est = EgoEstimator(robot_model=steward_bot().to_dict())
+    mug = Track(id="e:1", category_counts={"mug": 5.0}, pos=np.array([1.0, 0.0, 0.8]), var=np.full(3, 1e-4), yaw=0.0,
+                yaw_var=1e-3, size=np.array([0.1, 0.08, 0.1]), observations=6, first_seen=0.0, last_seen=1.0)
+    rng = np.random.default_rng(0)
+    clouds = [rng.uniform([-0.05, -0.04, 0.75], [0.05, 0.04, 0.85], (200, 3)) + [1.0 + dx, 0.0, 0.0] for dx in (0, 0, 0, 0.12)]
+    for cloud in clouds:
+        mug.voxels = est._union(mug.voxels, np.unique(np.floor(cloud / 0.01).astype(np.int32), axis=0))
+        mug.recent.append((cloud.mean(axis=0), np.array([0.1, 0.08, 0.1])))
+    est.tracks[mug.id] = mug
+    est._rebuild_geometry(mug, np.array([0.0, 0.0, 1.2]), 1.0)
+    assert mug.size[0] == pytest.approx(0.1, abs=0.01), "a view 12 cm off (an object pushed aside) does not swell it"
+    assert mug.pos[0] == pytest.approx(1.0, abs=0.02)
