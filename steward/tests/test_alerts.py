@@ -107,3 +107,18 @@ def test_a_published_plan_is_shown_and_gives_alerts_their_goal_and_step(tmp_path
         assert "当前步骤：自救：后撤" in printed[0] and "自我诊断：主要原因是抓取未对准" in printed[1]
     finally:
         api.stop()
+
+
+def test_the_runtime_records_step_changes_difficulties_states_and_alerts_for_the_console():
+    runtime = EgoRuntime(RobotLink("http://127.0.0.1:1"), steward_bot().to_dict())
+    steps = [{"name": "餐桌", "status": "active"}]
+    runtime.set_plan({"goal": "家务循环", "steps": steps, "current": "正在把白色碗 e:16 放到餐桌第 1 位"})
+    runtime.set_plan({"goal": "家务循环", "steps": steps, "current": "正在把白色碗 e:16 放到餐桌第 1 位"})
+    runtime.set_plan({"goal": "家务循环", "steps": steps, "current": "正在把白色碗 e:16 放到餐桌第 1 位",
+                      "difficulty": "抓取 白色碗 e:16 失败：高度 0.03 米超出升降范围", "state": "recovering"})
+    runtime.alert("家务循环卡住", "mission")
+    entries = runtime.plan_view()["activity"]
+    assert [e["kind"] for e in entries] == ["step", "difficulty", "state", "alert"], "a repeated step is recorded once"
+    assert "白色碗 e:16" in entries[1]["text"]
+    view = runtime.plan_view(since=entries[1]["id"])
+    assert [e["kind"] for e in view["activity"]] == ["state", "alert"] and view["activityLast"] == entries[-1]["id"]

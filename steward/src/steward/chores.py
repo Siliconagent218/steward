@@ -9,7 +9,7 @@ One round has three phases:
 3. **drawers**: both drawers are opened, the contents of the sideboard drawer and the cabinet
    drawer are exchanged, and both drawers are closed.
 
-Everything is located in the Ego-State by category, colour and estimated size; placements use
+Everything is located in the Ego-State by role (the scene-level reading of each object's category), colour and estimated size; placements use
 explicit offsets in the support's own frame, and every motion goes through a Prediction Receipt.
 """
 
@@ -20,7 +20,7 @@ import math
 import re
 import time
 
-from steward.diagnosis import Diagnosis, diagnose
+from steward.diagnosis import Diagnosis, describe, diagnose
 from steward.mission import (
     Blocked,
     MissionFailed,
@@ -33,7 +33,7 @@ from steward.mission import (
 )
 from steward.net import HttpError, call
 
-TABLEWARE = ("bowl", "wine_glass", "mug")
+TABLEWARE = ("bowl", "wine_glass", "mug", "cup")
 ROW_GAP = 0.06
 TABLE_ROW_Y = 0.18
 VIEW_DISTANCE = 1.1
@@ -44,7 +44,9 @@ def _summary(api: str) -> dict:
 
 
 def _objects(summary: dict, category: str) -> list[dict]:
-    return [o for o in summary["objects"] if o["category"] == category and o["existence"] >= 0.5]
+    """Objects whose role is ``category``: the scene-level reading, so that furniture or tableware
+    whose own best category is a look-alike (a sideboard read as a counter) is still found."""
+    return [o for o in summary["objects"] if o.get("role", o["category"]) == category and o["existence"] >= 0.5]
 
 
 def _one(summary: dict, category: str) -> dict:
@@ -202,14 +204,14 @@ class Chores:
         spots = blocker.get("parkAt") or []
         if not spots:
             raise MissionFailed(f"{blocker['id']} ({blocker['category']}) is in the way and there is no free spot to move it to")
-        self._doing(f"清障：把挡住操作路径的 {blocker['category']} {blocker['id']} 搬开")
+        self._doing(f"清障：把挡住操作路径的 {describe(obj)} 搬开")
         pick = _safe_receipt(self.api, "pick", {"target": obj["id"]}, obj, self.log)
         _run(self.api, pick, self.timeout_s)
         for spot in spots:
             receipt = call("POST", f"{self.api}/ego/predict", {"skill": "place", "params": {"at": spot}})
             if receipt["withinRiskLimit"]:
                 _run(self.api, receipt, self.timeout_s)
-                self._step(phase, f"清障完成：{blocker['category']} {blocker['id']} 放到 ({spot[0]:.2f}, {spot[1]:.2f})",
+                self._step(phase, f"清障完成：{describe(obj)} 放到 ({spot[0]:.2f}, {spot[1]:.2f})",
                            object=blocker["id"])
                 return
         raise MissionFailed(f"picked {blocker['id']} but none of the parking spots {spots} is reachable")
@@ -266,10 +268,10 @@ class Chores:
             spot = _world(table, _offset(table, x, TABLE_ROW_Y))
             if obj["on"] == table["id"] and math.dist(obj["position"][:2], spot) < 0.03:
                 continue
-            self._doing(f"把{obj.get('color') or ''} {obj['category']} {obj['id']} 放到餐桌第 {len(order)} 位")
+            self._doing(f"把{describe(obj)} 放到餐桌第 {len(order)} 位")
             self._clearing("table", lambda o=obj, xy=spot: _move(self.api, o, _place_at(self.api, table, xy),
                                                                   table, self.log, self.timeout_s))
-            self._step("table", f"{obj.get('color') or ''} {obj['category']} → 餐桌第 {len(order)} 位", object=obj["id"])
+            self._step("table", f"{describe(obj)} → 餐桌第 {len(order)} 位", object=obj["id"])
         return order
 
     # -------------------------------------------------------------- sideboard
@@ -288,17 +290,17 @@ class Chores:
                 offset = next(slot)
                 if bowl["on"] != board["id"]:
                     spot = _world(board, _offset(board, offset, 0.0))
-                    self._doing(f"把{bowl.get('color') or ''}碗 {bowl['id']} 放到餐边柜上作叠放底座")
+                    self._doing(f"把{describe(bowl)} 放到餐边柜上作叠放底座")
                     self._clearing("sideboard", lambda b=bowl, xy=spot: _move(
                         self.api, b, _place_at(self.api, board, xy), board, self.log, self.timeout_s))
-                    self._step("sideboard", f"{bowl.get('color') or ''} 碗 → 餐边柜（叠放底座）", object=bowl["id"])
+                    self._step("sideboard", f"{describe(bowl)} → 餐边柜（叠放底座）", object=bowl["id"])
             else:
                 below = _refresh(self.api, below)
                 if bowl["on"] != below["id"]:
-                    self._doing(f"把{bowl.get('color') or ''}碗 {bowl['id']} 叠进{below.get('color') or ''}碗 {below['id']}")
+                    self._doing(f"把{describe(bowl)} 叠进{describe(below)}")
                     self._clearing("sideboard", lambda b=bowl, u=below: _move(
                         self.api, b, {"on": u["id"]}, u, self.log, self.timeout_s))
-                    self._step("sideboard", f"{bowl.get('color') or ''} 碗 → 叠进 {below.get('color') or ''} 碗",
+                    self._step("sideboard", f"{describe(bowl)} → 叠进{describe(below)}",
                                object=bowl["id"])
             below = bowl
         for obj in others:
@@ -307,17 +309,17 @@ class Chores:
             if obj["on"] == board["id"]:
                 continue
             spot = _world(board, _offset(board, offset, 0.0))
-            self._doing(f"把 {obj['category']} {obj['id']} 放到餐边柜上")
+            self._doing(f"把{describe(obj)} 放到餐边柜上")
             self._clearing("sideboard", lambda o=obj, xy=spot: _move(
                 self.api, o, _place_at(self.api, board, xy), board, self.log, self.timeout_s))
-            self._step("sideboard", f"{obj['category']} → 餐边柜", object=obj["id"])
+            self._step("sideboard", f"{describe(obj)} → 餐边柜", object=obj["id"])
 
     # ----------------------------------------------------------------- drawers
     def _open(self, furniture: dict) -> dict:
         return self._clearing("drawers", lambda: self._open_once(furniture))
 
     def _open_once(self, furniture: dict) -> dict:
-        self._doing(f"走到 {furniture['category']} {furniture['id']} 前观察并打开它的抽屉")
+        self._doing(f"走到{describe(furniture)} 前观察并打开它的抽屉")
         _view(self.api, furniture, self.timeout_s)
         s = _summary(self.api)
         drawer = _drawer_of(s, furniture)
@@ -329,7 +331,7 @@ class Chores:
                 raise infeasible(f"open {drawer['id']}", receipt)
             _run(self.api, receipt, self.timeout_s)
             time.sleep(1.5)
-            self._step("drawers", f"打开 {furniture['category']} 的抽屉", object=drawer["id"])
+            self._step("drawers", f"打开{describe(furniture)} 的抽屉", object=drawer["id"])
         return _refresh(self.api, drawer)
 
     def _close(self, drawer: dict) -> None:
@@ -354,10 +356,10 @@ class Chores:
             for oid in items:
                 obj = _refresh(self.api, {"id": oid, "category": "item"})
                 dst = _refresh(self.api, dst)
-                self._doing(f"把 {obj['category']} {oid} 从抽屉 {src['id']} 移到抽屉 {dst['id']}")
+                self._doing(f"把{describe(obj)} 从抽屉 {src['id']} 移到抽屉 {dst['id']}")
                 self._clearing("drawers", lambda o=obj, d=dst: _move(self.api, o, {"on": d["id"]}, d, self.log,
                                                                        self.timeout_s))
-                self._step("drawers", f"{obj['category']}：抽屉对调", object=oid, to=dst["id"])
+                self._step("drawers", f"{describe(obj)}：抽屉对调", object=oid, to=dst["id"])
         self._clearing("drawers", lambda: self._close(b))
         self._clearing("drawers", lambda: self._close(a))
 

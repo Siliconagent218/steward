@@ -87,8 +87,9 @@ class SkillExecutor:
 
     def __init__(self, command: Callable[[dict], None], state: Callable[[], dict], mark_held: Callable[[str], None],
                  config: MotionConfig | None = None, shift: Callable[[str, list[float]], None] | None = None,
-                 on_error: Callable[[str], None] | None = None):
+                 on_error: Callable[[str], None] | None = None, on_finish: Callable[[Job], None] | None = None):
         self._on_error = on_error
+        self._on_finish = on_finish
         self._command = command
         self._state = state
         self._mark_held = mark_held
@@ -161,6 +162,8 @@ class SkillExecutor:
             self._safe_retract()
         finally:
             job.finished = self._state()["stamp"]
+            if self._on_finish is not None:
+                self._on_finish(job)
 
     def _safe_retract(self) -> None:
         try:

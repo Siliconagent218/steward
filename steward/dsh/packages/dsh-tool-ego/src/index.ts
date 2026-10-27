@@ -65,9 +65,11 @@ export function egoTools(ego: EgoService): ToolDefinition[] {
     }),
     defineTool({
       name: 'ego_query',
-      description: 'Find perceived objects by category (for example "cup", "table") and/or near another object.',
+      description: 'Find perceived objects by category (for example "cup", "table") and/or near another object. '
+        + 'Matching uses each object\'s role (the scene-level reading of what it is) and then its category '
+        + 'probabilities, best match first, so a sideboard partly seen and labelled "counter" is still found.',
       parameters: {
-        category: { type: 'string', description: 'Object category to keep.' },
+        category: { type: 'string', description: 'Object category or role to look for.' },
         near: { type: 'string', description: 'Id of an object whose surroundings to search, for example "e:3".' },
         radius: { type: 'number', description: 'Search radius in metres around `near` (default 1).' },
       },

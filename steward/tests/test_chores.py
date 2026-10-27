@@ -279,8 +279,8 @@ def test_a_round_without_progress_triggers_self_rescue_then_a_diagnosed_operator
     report = reports[0]
     assert "第 2 轮" in report["goal"] and report["step"] == "把红碗 e:9 放到餐桌第 1 位"
     assert "底盘受阻" in report["diagnosis"] and "6 次失败中 4 次" in report["diagnosis"]
-    assert "基本没有移动" in report["diagnosis"] and "wall e:8 0.30 米" in report["diagnosis"]
-    assert "Ego State 里没有 table" in report["diagnosis"]
+    assert "基本没有移动" in report["diagnosis"] and "墙 e:8 0.30 米" in report["diagnosis"]
+    assert "Ego State 里没有餐桌" in report["diagnosis"]
 
 
 def test_one_chores_round_is_confirmed_by_world_state(kitchen_root, tmp_path):

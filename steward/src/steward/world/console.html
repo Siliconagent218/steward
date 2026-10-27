@@ -81,15 +81,26 @@
   .composer textarea:focus { outline: none; border-color: #3c4652; }
   .composer button { height: 58px; }
   button:disabled { opacity: .5; cursor: default; }
-  .alert-overlay { position: absolute; inset: 0; display: flex; align-items: flex-start; justify-content: center;
-                   padding: 14px; pointer-events: none; animation: alertPulse 1.1s ease-in-out infinite; }
-  .alert-overlay[hidden] { display: none; }
-  @keyframes alertPulse { 0%, 100% { background: rgba(225, 30, 30, 0.45); } 50% { background: rgba(225, 30, 30, 0.06); } }
-  .alert-box { pointer-events: auto; max-width: 92%; max-height: 92%; overflow-y: auto; background: #2a0f12f0; border: 1px solid #ff6b6b; color: #ffd6d6;
-               border-radius: 8px; padding: 10px 12px; font-size: 13px; white-space: pre-wrap; }
-  .alert-box b { color: #ff8a8a; display: block; margin-bottom: 4px; }
-  .alert-box button { margin-top: 8px; border-color: #ff6b6b; }
-  .viewport.alerting { outline: 3px solid #ff4d4d; outline-offset: -3px; }
+  @keyframes alertPulse { 0%, 100% { background: rgba(120, 20, 24, 0.95); } 50% { background: rgba(60, 14, 18, 0.95); } }
+  @keyframes alertOutline { 0%, 100% { outline-color: #ff4d4d; } 50% { outline-color: #ff4d4d33; } }
+  .robot-status { margin-top: 8px; border: 1px solid var(--line); border-radius: 8px; background: #11151a; padding: 8px 10px;
+                  font-size: 12.5px; }
+  .rs-now div { margin: 1px 0; } .rs-now .label { color: var(--muted); }
+  .rs-alert[hidden] { display: none; }
+  .rs-alert { margin: 6px 0; padding: 8px 10px; border: 1px solid #ff6b6b; border-radius: 6px; color: #ffd6d6;
+              white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow-y: auto; animation: alertPulse 1.1s ease-in-out infinite; }
+  .rs-alert b { color: #ff8a8a; display: block; margin-bottom: 4px; }
+  .rs-alert button { margin-top: 6px; border-color: #ff6b6b; }
+  .rs-history { max-height: 160px; overflow-y: auto; margin-top: 6px; border-top: 1px solid #20262e; padding-top: 4px;
+                font-variant-numeric: tabular-nums; }
+  .rs-history .row { display: flex; gap: 6px; padding: 1px 0; align-items: baseline; }
+  .rs-history .t { color: var(--muted); min-width: 62px; }
+  .rs-history .k { min-width: 30px; font-size: 11px; color: var(--muted); }
+  .rs-history .row.step .k { color: #8fc7ff; } .rs-history .row.skill .k { color: #b8c4d0; }
+  .rs-history .row.difficulty .k, .rs-history .row.difficulty .x { color: #ffd27a; }
+  .rs-history .row.state .k { color: #c8a6ff; } .rs-history .row.alert .k, .rs-history .row.alert .x { color: #ff8a8a; }
+  .rs-history .x { white-space: pre-wrap; word-break: break-word; }
+  .viewport.alerting { outline: 3px solid #ff4d4d; outline-offset: -3px; animation: alertOutline 1.1s ease-in-out infinite; }
   .card h2 .sub { color: var(--muted); font-weight: 400; font-size: 12px; }
   .plan-goal { font-size: 14px; margin-bottom: 8px; }
   .plan-steps { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
@@ -155,11 +166,13 @@
           <img id="imgEgo" alt="Ego State">
           <canvas id="ovEgo" width="1024" height="768"></canvas>
           <div class="empty" id="egoEmpty">尚未收到机器人的自我态</div>
-          <div class="alert-overlay" id="egoAlert" hidden>
-            <div class="alert-box"><b>⚠ 机器人遇到无法自行处理的情况</b><span id="egoAlertText"></span>
-              <div><button id="egoAlertAck">知道了</button></div></div>
-          </div>
           <div class="hint">拖动旋转 · 滚轮缩放</div>
+        </div>
+        <div class="robot-status" id="robotStatus">
+          <div class="rs-now" id="rsNow">机器人尚未发布计划</div>
+          <div class="rs-alert" id="egoAlert" hidden><b>⚠ 机器人遇到无法自行处理的情况</b><span id="egoAlertText"></span>
+            <div><button id="egoAlertAck">知道了</button></div></div>
+          <div class="rs-history" id="rsHistory"></div>
         </div>
       </div>
     </div>
@@ -384,8 +397,10 @@ function drawEgoOverlay() {
     }
     if ($('showEgoLabels').checked) {
       const conf = o.existence < 0.99 ? `  存在 ${(o.existence * 100).toFixed(0)}%` : '';
-      const tint = o.color && COLOR_NAMES[o.color] && TABLEWARE.has(o.category) ? COLOR_NAMES[o.color] : '';
-      p.text([o.center[0], o.center[1], o.center[2] + o.size[2] / 2 + 0.1], `${tint}${label(o.category, o.id)}${conf}`, '#ffd2a6');
+      const kind = o.role || o.category;
+      const tint = o.color && COLOR_NAMES[o.color] && TABLEWARE.has(kind) ? COLOR_NAMES[o.color] : '';
+      const seenAs = kind !== o.category ? `（感知为${NAMES[o.category] || o.category}）` : '';
+      p.text([o.center[0], o.center[1], o.center[2] + o.size[2] / 2 + 0.1], `${tint}${label(kind, o.id)}${seenAs}${conf}`, '#ffd2a6');
     }
   }
   if ($('showError').checked) {
@@ -670,6 +685,8 @@ const ALERT_SOURCES = { agent: '机器人智能体报告', skill: '技能执行�
   harness: 'Ego Harness 运行失败', mission: '家务任务卡住' };
 const dismissedAlerts = new Set();
 function renderAlerts(alerts) {
+  // The alert sits in the status card below the Ego view (never over the render); the view's
+  // outline flashes while one is unacknowledged.
   alerts = alerts.filter(a => !dismissedAlerts.has(a.id));
   shownAlerts = alerts;
   const box = $('egoAlert');
@@ -715,10 +732,47 @@ function renderPlan(chat) {
     + `<div class="plan-now"><span class="label">正在执行的技能：</span>${esc(skill)}</div>`
     + (plan.difficulty ? `<div class="plan-trouble ${plan.state === 'waiting-operator' || plan.state === 'escaping' ? 'stuck' : ''}">遇到的困难：${esc(plan.difficulty)}</div>` : '');
 }
+const ACTIVITY_KINDS = { step: '步骤', skill: '技能', difficulty: '困难', state: '状态', alert: '告警' };
+let activityLast = 0;
+function renderRobotStatus(chat) {
+  // Macro step (phase), micro step (current action) and running skill of the robot, then its
+  // activity record (kept by the Ego Runtime, so it survives page reloads), newest at the bottom.
+  const robot = chat.agents.robot || {};
+  const view = robot.plan, todos = agentTodos(chat);
+  const plan = view && view.plan;
+  const skill = view && view.skill ? `${view.skill.skill}（已执行 ${Math.max(0, view.t - view.skill.started).toFixed(0)} s）` : '无';
+  let macro = '–', micro = '–';
+  if (todos) {
+    const active = todos.find(t => t.status === 'in_progress');
+    macro = `操作员任务：${active ? active.content : '（无进行中的待办）'}`;
+  } else if (plan) {
+    const active = plan.steps.find(st => st.status === 'active') || plan.steps.find(st => st.status === 'failed');
+    macro = `${active ? active.name : plan.goal}${plan.round ? `（第 ${plan.round} 轮` : '（'}· ${PLAN_STATES[plan.state] || plan.state}）`;
+    micro = plan.current || '–';
+  }
+  $('rsNow').innerHTML = (view ? `<div><span class="label">宏观步骤：</span>${esc(macro)}</div>`
+    + `<div><span class="label">微观步骤：</span>${esc(micro)}</div><div><span class="label">技能：</span>${esc(skill)}</div>`
+    : '机器人尚未发布计划');
+  if (!view) return;
+  const box = $('rsHistory');
+  if ((view.activityLast || 0) < activityLast) { activityLast = 0; box.innerHTML = ''; }  // the runtime restarted
+  const fresh = (view.activity || []).filter(e => e.id > activityLast);
+  if (!fresh.length) return;
+  const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 30;
+  box.insertAdjacentHTML('beforeend', fresh.map(e => {
+    const text = e.kind === 'state' ? (PLAN_STATES[e.text] || e.text) : e.text;
+    return `<div class="row ${e.kind}"><span class="t">t=${e.t.toFixed(0)}s</span><span class="k">${ACTIVITY_KINDS[e.kind] || e.kind}</span>`
+      + `<span class="x">${esc(text)}</span></div>`;
+  }).join(''));
+  while (box.children.length > 300) box.firstChild.remove();
+  activityLast = fresh[fresh.length - 1].id;
+  if (nearBottom) box.scrollTop = box.scrollHeight;
+}
 async function refreshChat() {
   try {
-    chatState = await api('GET', '/console/chat');
+    chatState = await api('GET', `/console/chat?activity=${activityLast}`);
     renderAlerts((chatState.agents.robot && chatState.agents.robot.alerts) || []);
+    renderRobotStatus(chatState);
     renderPlan(chatState);
     renderStatus();
     const sig = JSON.stringify([chatTarget, Object.values(chatState.agents).map(a => a.busy), chatState.messages]);

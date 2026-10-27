@@ -14,6 +14,64 @@ from collections import Counter
 from dataclasses import dataclass
 
 TABLEWARE = frozenset({"bowl", "cup", "mug", "plate", "wine_glass"})
+COLOR_ZH = {"red": "红色", "green": "绿色", "blue": "蓝色", "black": "黑色", "white": "白色", "gray": "灰色",
+            "clear": "透明", "brown": "棕色", "beige": "米色", "yellow": "黄色"}
+CATEGORY_ZH = {"table": "餐桌", "counter": "操作台", "cabinet": "柜子", "sideboard": "餐边柜", "cup": "杯子", "bowl": "碗",
+               "plate": "盘子", "drawer": "抽屉", "wine_glass": "高脚杯", "mug": "咖啡杯", "teddy_bear": "玩具熊",
+               "scissors": "剪刀", "chair": "椅子", "wall": "墙", "unknown": "未知物体"}
+SKILL_ZH = {"pick": "抓取", "place": "放置", "navigate": "导航", "open": "打开", "close": "关上"}
+
+
+def describe(obj: dict) -> str:
+    """A Chinese name of an Ego-State object for operator text: colour (tableware only), role (or
+    category), id.
+
+    :param obj: an object of the Ego API summary.
+    :returns: for example ``白色碗 e:16``.
+    """
+    kind = obj.get("role") or obj["category"]
+    color = COLOR_ZH.get(obj.get("color") or "", "") if kind in TABLEWARE else ""
+    return f"{color}{CATEGORY_ZH.get(kind, kind)} {obj['id']}"
+
+
+def explain(message: str, summary: dict | None = None) -> str:
+    """A failure message in short Chinese, with the objects it mentions named.
+
+    :param message: a failure message of a prediction, a skill or the mission.
+    :param summary: the Ego API summary used to name objects, if available.
+    :returns: the explanation.
+    """
+    names = {o["id"]: describe(o) for o in (summary or {}).get("objects", [])}
+    name = lambda oid: names.get(oid, oid)  # noqa: E731 - local shorthand
+    parts = []
+    approach = re.search(r"no feasible approach: (.*?)(?:'\]|$)", message)
+    if approach:
+        sides = approach.group(1).split("; ")
+        blockers = Counter(m for side in sides for m in re.findall(r"collides with (e:\d+)", side))
+        blocked = sum(1 for side in sides if "collides with" in side)
+        if blocked:
+            parts.append(f"{blocked} 个方向的停靠位被 " + "、".join(name(b) for b in blockers) + " 挡住")
+        for reach in re.findall(r"reach ([\d.]+) m out of range", approach.group(1)):
+            parts.append(f"1 个方向伸手 {float(reach):.2f} 米超出范围")
+    rules = [
+        (r"height ([\d.]+) m is outside the lift range \[([\d.]+), ([\d.]+)\]",
+         lambda m: f"高度 {float(m[1]):.2f} 米超出升降范围 {m[2]}–{m[3]} 米" + ("（物体在地面上）" if float(m[1]) < 0.1 else "")),
+        (r"existence probability is only ([\d.]+)", lambda m: f"目标的存在概率只有 {m[1]}"),
+        (r"missed the handle of (e:\d+)", lambda m: f"没抓到 {name(m[1])} 的把手"),
+        (r"missed", lambda m: "抓取没有对准"),
+        (r"base is blocked", lambda m: "底盘受阻，原地没有进展"),
+        (r"turn did not converge", lambda m: "原地转身没有到位"),
+        (r"joint (\w+) did not reach ([\d.]+) \(at ([\d.]+)\)", lambda m: f"{m[1]} 没能到 {float(m[2]):.2f}（停在 {float(m[3]):.2f}，被挡住）"),
+        (r"no support surface is known under (e:\d+)", lambda m: f"不知道 {name(m[1])} 放在什么上面"),
+        (r"no ([\w ]+?) in the ego state", lambda m: f"Ego State 里没有 {CATEGORY_ZH.get(m[1], m[1])}"),
+        (r"(e:\d+) \((\w+)\) is in the way and there is no free spot", lambda m: f"{name(m[1])} 挡路，且没有空位可以挪开它"),
+    ]
+    for pattern, render in rules:
+        found = re.search(pattern, message)
+        if found and not approach:
+            parts.append(render(found))
+            break
+    return "；".join(parts) if parts else re.sub(r"e:\d+", lambda m: name(m[0]), message)[:160]
 STATIONARY_M = 0.25
 TIGHT_M = 0.45
 LOW_CONFIDENCE = 0.55
@@ -99,6 +157,7 @@ def diagnose(failures: list[dict], summary: dict | None, needs: dict[str, int]) 
     if len(counts) > 1:
         findings.append("失败原因分布：" + "、".join(f"{by_key[k].label.split('：')[0]} ×{n}" for k, n in counts.most_common()))
     findings += _motion_findings(failures, summary)
+    findings = _failed_target_findings(failures, summary) + findings
     if summary is not None:
         findings += _blocker_findings(failures, summary)
         findings += _target_findings(failures, summary)
@@ -119,8 +178,25 @@ def _motion_findings(failures: list[dict], summary: dict | None) -> list[str]:
                 if o["existence"] >= 0.5 and o["id"] != me.get("holding") and o["position"][2] < 1.2]
         close = sorted((d, o) for d, o in near if d < TIGHT_M)
         if close:
-            out.append("机器人现在离 " + "、".join(f"{o['category']} {o['id']} {d:.2f} 米" for d, o in close[:3])
+            out.append("机器人现在离 " + "、".join(f"{describe(o)} {d:.2f} 米" for d, o in close[:3])
                        + "，周围空间很窄")
+    return out
+
+
+def _failed_target_findings(failures: list[dict], summary: dict | None) -> list[str]:
+    """Each object the failed actions worked on, named, with what was tried and why it failed."""
+    names = {o["id"]: describe(o) for o in (summary or {}).get("objects", [])}
+    grouped: dict[str, list[dict]] = {}
+    for f in failures:
+        target = next(iter(re.findall(r"e:\d+", f.get("step") or "")), None) or next(iter(re.findall(r"e:\d+", f["message"])), "—")
+        grouped.setdefault(target, []).append(f)
+    out = []
+    for target, items in grouped.items():
+        skill = re.match(r"(pick|place|navigate|open|close)\b", items[-1]["message"])
+        action = SKILL_ZH[skill[1]] if skill else "处理"
+        reasons = list(dict.fromkeys(explain(f["message"], summary) for f in items))
+        what = names.get(target, target) if target != "—" else "（未指明对象）"
+        out.append(f"{action} {what} 失败 {len(items)} 次：" + "；".join(reasons[:2]))
     return out
 
 
@@ -133,7 +209,7 @@ def _blocker_findings(failures: list[dict], summary: dict) -> list[str]:
         return []
     oid, n = hits.most_common(1)[0]
     obj = next((o for o in summary["objects"] if o["id"] == oid), None)
-    name = f"{obj['category']} {oid}" if obj else f"{oid}（已不在 Ego State 里）"
+    name = describe(obj) if obj else f"{oid}（已不在 Ego State 里）"
     return [f"停靠位或路径 {n} 次被 {name} 挡住"]
 
 
@@ -145,7 +221,7 @@ def _target_findings(failures: list[dict], summary: dict) -> list[str]:
         e = obj.get("extentM") or obj["sizeM"]
         bottom = obj["position"][2] - e[2] / 2
         if obj["category"] in TABLEWARE and bottom < 0.05:
-            out.append(f"操作目标 {obj['category']} {obj['id']} 在地面上（高 {e[2]:.2f} 米、底部离地 {max(bottom, 0.0):.2f} 米），"
+            out.append(f"操作目标 {describe(obj)} 在地面上（高 {e[2]:.2f} 米、底部离地 {max(bottom, 0.0):.2f} 米），"
                        "可能是把地面上的扁平物体误认成了餐具")
     return out
 
@@ -165,15 +241,16 @@ def _ego_state_findings(summary: dict, needs: dict[str, int]) -> list[str]:
     out = []
     objects = [o for o in summary["objects"] if o["existence"] >= 0.5]
     for category, expected in needs.items():
-        found = [o for o in objects if o["category"] == category]
+        found = [o for o in objects if o.get("role", o["category"]) == category]
+        zh = CATEGORY_ZH.get(category, category)
         if not found:
-            out.append(f"Ego State 里没有 {category}，需要它的步骤都无法规划")
+            out.append(f"Ego State 里没有{zh}，需要它的步骤都无法规划")
         elif len(found) > expected:
-            out.append(f"Ego State 里有 {len(found)} 个 {category}（任务只需要 {expected} 个），可能有重复轨迹或把别的物体认成了它："
+            out.append(f"Ego State 里有 {len(found)} 个{zh}（任务只需要 {expected} 个），可能有重复轨迹或把别的物体认成了它："
                        + "、".join(f"{o['id']} 在 ({o['position'][0]:.2f}, {o['position'][1]:.2f})" for o in found))
         for o in found:
             if o["categoryConfidence"] < LOW_CONFIDENCE:
                 rivals = sorted(((p, c) for c, p in o["categories"].items() if c != category), reverse=True)[:2]
-                out.append(f"{o['id']} 被认作 {category} 的把握只有 {o['categoryConfidence']:.2f}（其次 "
-                           + "、".join(f"{c} {p:.2f}" for p, c in rivals) + "）")
+                out.append(f"{o['id']} 被认作{zh}的把握只有 {o['categoryConfidence']:.2f}（其次 "
+                           + "、".join(f"{CATEGORY_ZH.get(c, c)} {p:.2f}" for p, c in rivals) + "）")
     return out

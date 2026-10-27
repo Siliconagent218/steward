@@ -85,6 +85,7 @@ def _ego_view(ego: dict) -> dict:
         size = ent["body"]["links"][0]["geometry"]["collision"][0]["size"]
         objects.append({"id": ent["id"], "category": ent["category"]["value"], "center": p["p"], "size": size,
                         "yaw": yaw_from_quat(p["q"]), "sigma": sigma, "existence": ent.get("existence", 1.0),
-                        "color": (ent.get("stateVars", {}).get("color") or {}).get("value")})
+                        "color": (ent.get("stateVars", {}).get("color") or {}).get("value"),
+                        "role": (ent.get("stateVars", {}).get("role") or {}).get("value")})
     held = [r["a"]["entity"] for r in ego.get("relations", []) if r["type"] == "attached"]
     return {"version": ego.get("version"), "t": ego.get("stamp"), "self": self_pose, "objects": objects, "holding": held}

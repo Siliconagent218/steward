@@ -69,7 +69,7 @@ def ego_api(runtime: EgoRuntime, port: int = 0) -> JsonServer:
         ("GET", "/ego/view"): lambda q, b: runtime.view.status(),
         ("POST", "/ego/view"): lambda q, b: runtime.view.configure(ViewSettings.parse(b)),
         ("GET", "/ego/view/frame"): lambda q, b: view_frame(q),
-        ("GET", "/ego/plan"): lambda q, b: runtime.plan_view(),
+        ("GET", "/ego/plan"): lambda q, b: runtime.plan_view(int(q.get("since", 0))),
         ("POST", "/ego/plan"): lambda q, b: runtime.set_plan(b),
         ("POST", "/ego/control"): lambda q, b: control(b),
         ("POST", "/ego/predict"): lambda q, b: runtime.predict(b["skill"], b.get("params", {})),

@@ -7,6 +7,7 @@ telemetry). It never holds World State identifiers or ground truth.
 
 from __future__ import annotations
 
+import collections
 import itertools
 import math
 import threading
@@ -20,6 +21,7 @@ from steward.ego.classify import classify
 from steward.ego.perception import box_of, decode_rgbd, segments
 from steward.ego.esim import Esim, EsimConfig
 from steward.ego.estimator import SELF_ID, EgoEstimator
+from steward.ego.roles import RoleConfig, assign_roles
 from steward.ego.skills import MotionConfig, SkillExecutor
 from steward.ego.view import EgoViewRenderer
 from steward.math3d import yaw_from_quat
@@ -35,6 +37,7 @@ class RuntimeConfig:
     max_risk: float = 0.35
     esim: EsimConfig = field(default_factory=EsimConfig)
     motion: MotionConfig = field(default_factory=MotionConfig)
+    roles: RoleConfig = field(default_factory=RoleConfig)
 
 
 class RobotLink:
@@ -61,6 +64,8 @@ class RobotLink:
 
 
 ALERT_TEXT_MAX = 1500
+QUERY_MIN_PROBABILITY = 0.2
+ACTIVITY_MAX = 300
 PLAN_STEP_STATES = frozenset({"pending", "active", "done", "failed", "skipped"})
 
 class EgoRuntime:
@@ -80,9 +85,12 @@ class EgoRuntime:
         self.perception_mode: str | None = None
         self.alerts: list[dict] = []
         self.plan: dict | None = None
+        self.activity: collections.deque[dict] = collections.deque(maxlen=ACTIVITY_MAX)
+        self._activity_ids = itertools.count(1)
         self._alert_ids = itertools.count(1)
         self.executor = SkillExecutor(self.link.command, self._motion_state, self._mark_held, self.config.motion,
-                                      shift=self._shift_track, on_error=lambda msg: self.alert(msg, "skill"))
+                                      shift=self._shift_track, on_error=lambda msg: self.alert(msg, "skill"),
+                                      on_finish=self._skill_finished)
         self._view_scene: tuple[dict, int, float] | None = None  # (ES dict, version, stamp) for the view
         renderer = EgoViewRenderer()
         self.view = ViewLoop("ego", lambda settings: self._render_view(renderer, settings), renderer.close)
@@ -126,6 +134,18 @@ class EgoRuntime:
             self.estimator.update(frame)
             self._publish_view_scene()
 
+    def _telemetry_scene(self) -> dict:
+        """The Ego-State sent as telemetry, each object carrying its scene-level role as the state
+        variable ``role`` (``src: inferred``) next to its perceived category."""
+        roles = {o["id"]: (o["role"], o["roleConfidence"]) for o in self.summary()["objects"]}
+        scene = self.ego_state().to_dict()
+        for ent in scene["entities"]:
+            if ent["id"] in roles:
+                role, p = roles[ent["id"]]
+                ent.setdefault("stateVars", {})["role"] = {"value": role, "unc": {"kind": "categorical", "p": {role: p}},
+                                                           "src": "inferred"}
+        return scene
+
     def _publish_view_scene(self) -> None:
         """Hand the view a copy of the Ego-State taken right after a perception update (the caller
         holds the lock), so rendering never waits for the next update to finish."""
@@ -157,7 +177,7 @@ class EgoRuntime:
                 self._poll_once()
                 k += 1
                 if k % telemetry_every == 0:
-                    self.link.telemetry(self.ego_state().to_dict())
+                    self.link.telemetry(self._telemetry_scene())
                 self.last_error = None
             except (HttpError, OSError) as exc:
                 self.last_error = f"robot port unavailable: {exc}"
@@ -217,6 +237,10 @@ class EgoRuntime:
                 **({"openingM": round(self._opening(ent.id), 3)} if ent.category.value == "drawer" else {}),
                 **self._front(ent),
             })
+        roles = assign_roles(objects, self.config.roles)
+        for obj in objects:
+            obj["role"], confidence = roles[obj["id"]]
+            obj["roleConfidence"] = round(confidence, 3)
         job = self.executor.current.to_dict() if self.executor.current else None
         return {
             "version": es.version,
@@ -254,9 +278,12 @@ class EgoRuntime:
             return self.estimator.drawer_opening(track) if track is not None else 0.0
 
     def query(self, category: str | None = None, near: str | None = None, radius: float | None = None) -> list[dict]:
+        """Objects matching a category by role or, failing that, by probability (best match first),
+        optionally within ``radius`` of another object."""
         objs = self.summary()["objects"]
         if category:
-            objs = [o for o in objs if o["category"] == category]
+            score = lambda o: 2.0 if o["role"] == category else o["categories"].get(category, 0.0)  # noqa: E731
+            objs = sorted((o for o in objs if score(o) >= QUERY_MIN_PROBABILITY), key=score, reverse=True)
         if near:
             anchor = next((o for o in self.summary()["objects"] if o["id"] == near), None)
             if anchor is None:
@@ -323,7 +350,8 @@ class EgoRuntime:
                       "diagnosis": diagnosis[:ALERT_TEXT_MAX]}
             self.alerts.append(record)
             del self.alerts[:-50]
-            return record
+        self._log("alert", message)
+        return record
 
     def alerts_view(self) -> dict:
         with self._lock:
@@ -336,6 +364,27 @@ class EgoRuntime:
                 if alert_id is None or record["id"] == alert_id:
                     record["acknowledged"] = True
         return self.alerts_view()
+
+    # ---------------------------------------------------------------- activity
+    def _log(self, kind: str, text: str) -> None:
+        """Append to the activity record the console shows below the Ego-State view: ``step``,
+        ``difficulty``, ``state``, ``skill`` and ``alert`` entries, newest last."""
+        with self._lock:
+            self.activity.append({"id": next(self._activity_ids), "t": round(self.estimator.stamp, 1),
+                                  "kind": kind, "text": text[:ALERT_TEXT_MAX]})
+
+    def _skill_finished(self, job) -> None:
+        result = {"succeeded": "完成", "failed": "失败", "stopped": "被停止"}.get(job.state, job.state)
+        self._log("skill", f"{job.skill} {result}" + (f"：{job.message}" if job.state != "succeeded" else ""))
+
+    def activity_since(self, since: int = 0) -> list[dict]:
+        """Activity entries with an id above ``since``, oldest first.
+
+        :param since: the id of the newest entry the caller already has.
+        :returns: the newer entries.
+        """
+        with self._lock:
+            return [dict(e) for e in self.activity if e["id"] > since]
 
     # -------------------------------------------------------------------- plan
     def set_plan(self, plan: dict) -> dict:
@@ -355,15 +404,30 @@ class EgoRuntime:
                   "difficulty": str(plan.get("difficulty") or "")[:600], "state": str(plan.get("state") or "running")[:40],
                   "t": round(self.estimator.stamp, 2)}
         with self._lock:
-            self.plan = record
+            previous, self.plan = self.plan or {}, record
+        if record["current"] and record["current"] != previous.get("current"):
+            self._log("step", record["current"])
+        if record["difficulty"] and record["difficulty"] != previous.get("difficulty"):
+            self._log("difficulty", record["difficulty"])
+        if record["state"] != previous.get("state", "running"):
+            self._log("state", record["state"])
         return record
 
-    def plan_view(self) -> dict:
-        """The latest published plan (``None`` before any) and the skill running now."""
+    def plan_view(self, since: int = 0) -> dict:
+        """The latest published plan (``None`` before any), the skill running now and the activity
+        entries newer than ``since``.
+
+        :param since: the id of the newest activity entry the caller already has.
+        :returns: ``{"plan", "skill", "activity", "activityLast", "t"}`` (``activityLast`` is the newest
+            id, lower than ``since`` after the runtime restarted).
+        """
         running = next((j for j in reversed(list(self.executor.jobs.values())) if j.state == "running"), None)
         with self._lock:
             plan = dict(self.plan) if self.plan else None
-        return {"plan": plan, "skill": running.to_dict() if running else None, "t": round(self.estimator.stamp, 2)}
+        with self._lock:
+            newest = self.activity[-1]["id"] if self.activity else 0
+        return {"plan": plan, "skill": running.to_dict() if running else None, "activity": self.activity_since(since),
+                "activityLast": newest, "t": round(self.estimator.stamp, 2)}
 
     # ----------------------------------------------------------------- control
     def control(self) -> dict:
@@ -405,7 +469,11 @@ class EgoRuntime:
         if receipt["risk"] > self.config.max_risk:
             raise PermissionError(f"receipt risk {receipt['risk']:.2f} exceeds the limit {self.config.max_risk:.2f}")
         receipt["used"] = True
-        return self.executor.start(receipt["skill"], receipt).to_dict()
+        job = self.executor.start(receipt["skill"], receipt).to_dict()
+        params = receipt.get("params") or {}
+        target = params.get("target") or params.get("on") or (f"({params['x']:.2f}, {params['y']:.2f})" if "x" in params else "")
+        self._log("skill", f"{receipt['skill']} 开始" + (f"：{target}" if target else ""))
+        return job
 
     def explore(self, owner: str | None = None) -> dict:
         """Look around in place. Rotation without translation needs no receipt."""

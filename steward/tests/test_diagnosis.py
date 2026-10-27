@@ -42,14 +42,14 @@ def test_diagnosis_names_the_dominant_cause_and_flags_duplicate_and_doubtful_tra
     assert diagnosis.cause.key == "perception-missing" and (diagnosis.explained, diagnosis.total) == (2, 4)
     text = diagnosis.text
     assert "失败原因分布" in text and "基本没有移动" not in text
-    assert "有 2 个 table" in text and "e:22 在 (-2.60, 0.60)" in text
-    assert "e:40 被认作 sideboard 的把握只有 0.46（其次 counter 0.33、table 0.21）" in text
+    assert "有 2 个餐桌" in text and "e:22 在 (-2.60, 0.60)" in text
+    assert "e:40 被认作餐边柜的把握只有 0.46（其次 操作台 0.33、餐桌 0.21）" in text
     assert text.splitlines()[-1].startswith("建议：")
 
 
 def test_diagnosis_works_from_the_failure_log_alone():
     diagnosis = diagnose([{"message": "navigate failed: base is blocked", "pose": None}], None, {"table": 1})
-    assert diagnosis.cause.key == "base-blocked" and "依据" not in diagnosis.text
+    assert diagnosis.cause.key == "base-blocked" and "导航 （未指明对象） 失败 1 次：底盘受阻" in diagnosis.text
 
 
 def test_diagnosis_names_the_repeated_blocker_and_tableware_lying_on_the_floor():
@@ -64,5 +64,6 @@ def test_diagnosis_names_the_repeated_blocker_and_tableware_lying_on_the_floor()
          "message": "pick infeasible: ['height 0.03 m is outside the lift range [0.32, 1.28]']"},
     ]
     text = diagnose(failures, summary, {"table": 1}).text
-    assert "停靠位或路径 2 次被 table e:7 挡住" in text
-    assert "操作目标 bowl e:16 在地面上" in text and "误认成了餐具" in text
+    assert "停靠位或路径 2 次被 餐桌 e:7 挡住" in text
+    assert "操作目标 碗 e:16 在地面上" in text and "误认成了餐具" in text
+    assert "抓取 碗 e:16 失败 2 次：2 个方向的停靠位被 餐桌 e:7 挡住；高度 0.03 米超出升降范围" in text

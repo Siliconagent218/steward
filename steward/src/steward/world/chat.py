@@ -41,6 +41,8 @@ ROBOT_BRIEF = (
     "你是家用服务机器人 robot-1。操作员通过控制台给你下达新任务；在这一轮对话期间你独占控制机器人，"
     "原来的后台任务会暂停，等你这一轮结束后再继续。\n"
     "做法：先用 ego_state 看看你已经知道哪些物体；找不到或不确定时用 ego_explore 环顾，或导航靠近观察。"
+    "按物体的 role 理解操作员说的「餐边柜」「柜子」「咖啡杯」等指称：role 是结合整个场景推断出的用途标签，"
+    "category 只是单个视角下最像的类别，局部视角下家具和相似餐具容易混淆。"
     "每个动作先用 ego_predict 得到收据，风险超限就先靠近观察再预测，然后用 skill_run 执行；"
     "执行后用 ego_state 自查结果。完成或无法完成时，用一两句中文向操作员汇报。\n"
     "不要反复试错：ego_predict 的 issues 里给出建议时（例如「原地放下」的参数）先照做；同一个目标连续 3 次预测都不可行，"
@@ -165,10 +167,11 @@ class HarnessChat:
             return f"profile {agent.profile!r} missing in {agent.home}; run steward/scripts/setup-dsh-profiles.sh"
         return agent.extra_reason() if agent.extra_reason else None
 
-    def state(self, since: int = 0) -> dict:
+    def state(self, since: int = 0, activity_since: int = 0) -> dict:
         robot = {}
         if "robot" in self.agents and self.config and self.config.ego_api:
-            robot = {"control": self._robot_owner(), "alerts": self._robot_alerts(), "plan": self._robot_plan()}
+            robot = {"control": self._robot_owner(), "alerts": self._robot_alerts(),
+                     "plan": self._robot_plan(activity_since)}
         with self._lock:
             agents = {key: {"label": a.label, "available": self.unavailable_reason(key) is None,
                             "reason": self.unavailable_reason(key), "busy": a.busy, "sessionId": a.session_id}
@@ -254,10 +257,11 @@ class HarnessChat:
                 self._add("robot", "error", f"⚠ 机器人遇到无法自行处理的情况（{source}）：{alert['message']}{context}")
         return active
 
-    def _robot_plan(self) -> dict | None:
-        """The plan the robot last published and the skill it is running, ``None`` when unknown."""
+    def _robot_plan(self, activity_since: int = 0) -> dict | None:
+        """The plan the robot last published, the skill it is running and its activity entries
+        newer than ``activity_since``; ``None`` when unknown."""
         try:
-            return call("GET", f"{self.config.ego_api}/ego/plan", timeout=0.5)
+            return call("GET", f"{self.config.ego_api}/ego/plan?since={int(activity_since)}", timeout=0.5)
         except (HttpError, OSError):  # the robot's Ego API is down or predates plans; nothing to show
             return None
 
