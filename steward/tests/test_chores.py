@@ -344,3 +344,19 @@ def test_tableware_lying_on_the_floor_is_left_out_of_the_arrangement():
     summary = {"objects": [item("e:1", "bowl", 0.79, [0.2, 0.2, 0.06]), item("e:2", "mug", 0.8, [0.1, 0.08, 0.1]),
                            item("e:3", "bowl", 0.02, [0.24, 0.24, 0.02])]}
     assert [o["id"] for o in tableware(summary)] == ["e:2", "e:1"], "the flat thing on the floor is not picked up"
+
+
+def test_a_plate_lying_on_the_floor_blocks_but_is_not_offered_as_movable():
+    from steward.ego.esim import Esim
+    from steward.ego.estimator import Track
+
+    est = EgoEstimator(robot_model=steward_bot().to_dict())
+    for oid, cat, pos, size in (("e:1", "chair", [1.0, 0.0, 0.45], [0.46, 0.46, 0.9]),
+                                ("e:2", "plate", [2.0, 0.0, 0.01], [0.24, 0.24, 0.02])):
+        est.tracks[oid] = Track(id=oid, category_counts={cat: 5.0}, pos=np.array(pos), var=np.full(3, 1e-4), yaw=0.0,
+                                yaw_var=1e-3, size=np.array(size), observations=5, first_seen=0.0, last_seen=0.0,
+                                existence=1.0)
+    esim = Esim(steward_bot().to_dict())
+    esim._blockers = {"e:1", "e:2"}
+    blockers = {b["id"]: b for b in esim._describe_blockers(est.to_scene())}
+    assert blockers["e:1"]["movable"] and not blockers["e:2"]["movable"] and blockers["e:2"]["parkAt"] == []

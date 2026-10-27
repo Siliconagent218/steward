@@ -260,8 +260,9 @@ class Esim:
 
     # ---------------------------------------------------------------- blockers
     def _describe_blockers(self, es: SceneState) -> list[dict]:
-        """Entities that made the prediction infeasible; floor-standing graspable ones are movable
-        and come with parking spots out of everyone's way."""
+        """Entities that made the prediction infeasible. Floor-standing graspable ones (a chair) are
+        movable and come with parking spots out of everyone's way; tableware lying on the floor is
+        not, since the lift cannot reach down to it."""
         held = self._held(es)
         out = []
         for eid in sorted(self._blockers):
@@ -269,7 +270,8 @@ class Esim:
             if ent is None or ent.role == "environment" or ent.id == es.self_id:
                 continue
             _, bottom, _ = entity_box(ent)
-            movable = self._affords(ent, "graspable") and bottom < 0.05 and (held is None or held.id != ent.id)
+            movable = (self._affords(ent, "graspable") and self._affords(ent, "floor-standing") and bottom < 0.05
+                       and (held is None or held.id != ent.id))
             out.append({"id": ent.id, "category": ent.category.value, "movable": movable,
                         "parkAt": self._parking_spots(es, ent) if movable else []})
         return out
