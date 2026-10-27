@@ -5,7 +5,7 @@ One round has three phases:
 1. **table**: the tableware (bowls, wine glass, mug) stands in one row on the dining table,
    ordered from the smallest to the largest footprint;
 2. **sideboard**: the tableware moves to the sideboard top; bowls nest largest to smallest in
-   one stack, the other pieces stand in a row beside it;
+   one stack, the other pieces stand in a row beside it (pieces already in place stay);
 3. **drawers**: both drawers are opened, the contents of the sideboard drawer and the cabinet
    drawer are exchanged, and both drawers are closed.
 
@@ -179,16 +179,23 @@ class Chores:
         for bowl in bowls:
             bowl = _refresh(self.api, bowl)
             if below is None:
-                _move(self.api, bowl, {"on": board["id"], "offset": [0.0, next(slot)]}, board, self.log, self.timeout_s)
-                self._step("sideboard", f"{bowl.get('color') or ''} 碗 → 餐边柜（叠放底座）", object=bowl["id"])
+                offset = next(slot)
+                if bowl["on"] != board["id"]:
+                    _move(self.api, bowl, {"on": board["id"], "offset": [0.0, offset]}, board, self.log, self.timeout_s)
+                    self._step("sideboard", f"{bowl.get('color') or ''} 碗 → 餐边柜（叠放底座）", object=bowl["id"])
             else:
                 below = _refresh(self.api, below)
-                _move(self.api, bowl, {"on": below["id"]}, below, self.log, self.timeout_s)
-                self._step("sideboard", f"{bowl.get('color') or ''} 碗 → 叠进 {below.get('color') or ''} 碗", object=bowl["id"])
+                if bowl["on"] != below["id"]:
+                    _move(self.api, bowl, {"on": below["id"]}, below, self.log, self.timeout_s)
+                    self._step("sideboard", f"{bowl.get('color') or ''} 碗 → 叠进 {below.get('color') or ''} 碗",
+                               object=bowl["id"])
             below = bowl
         for obj in others:
             obj = _refresh(self.api, obj)
-            _move(self.api, obj, {"on": board["id"], "offset": [0.0, next(slot)]}, board, self.log, self.timeout_s)
+            offset = next(slot)
+            if obj["on"] == board["id"]:
+                continue
+            _move(self.api, obj, {"on": board["id"], "offset": [0.0, offset]}, board, self.log, self.timeout_s)
             self._step("sideboard", f"{obj['category']} → 餐边柜", object=obj["id"])
 
     # ----------------------------------------------------------------- drawers
