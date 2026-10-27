@@ -13,6 +13,8 @@ frame. It never reports World State identifiers.
 from __future__ import annotations
 
 import copy
+import io
+import json
 import math
 import queue
 import threading
@@ -53,7 +55,16 @@ class EditError(ValueError):
 
 @dataclass
 class PerceptionConfig:
+    # "ideal": the robot receives detections (category and box with noise); "rgbd": the robot
+    # receives RGB, depth and anonymous instance masks and must detect and estimate by itself.
+    mode: str = "ideal"
     max_range: float = 8.0
+    depth_sigma_base: float = 0.0012
+    depth_sigma_quadratic: float = 0.0019
+    transparent_depth_drop: float = 0.4
+    transparent_depth_noise: float = 3.0
+    mask_erode_prob: float = 0.3
+    min_mask_pixels: int = 25
     pos_sigma_base: float = 0.01
     pos_sigma_per_m: float = 0.02
     size_sigma_rel: float = 0.03
@@ -78,6 +89,7 @@ class _RenderRequest:
     width: int
     height: int
     fmt: str = "png"
+    robot: str | None = None
     done: threading.Event = field(default_factory=threading.Event)
     png: bytes = b""
     error: Exception | None = None
@@ -639,7 +651,7 @@ class WorldSim:
             }
             joints = {jid: self._joint_q(jname) for jid, jname in names.joints.items()}
             cam_pose, sensor = self.camera_pose(robot_id)
-            return {
+            frame = {
                 "stamp": self.time,
                 "odometry": odom,
                 "joints": joints,
@@ -647,8 +659,12 @@ class WorldSim:
                             "holding": rs.attached is not None or rs.handle is not None,
                             "holdingHandle": rs.handle is not None},
                 "camera": {"id": sensor["id"], "intrinsics": sensor["intrinsics"]},
-                "detections": self._detections(robot_id, cam_pose, sensor),
             }
+            if self.perception.mode == "rgbd":
+                frame["imaging"] = "rgbd"
+            else:
+                frame["detections"] = self._detections(robot_id, cam_pose, sensor)
+            return frame
 
     def perception_parts(self, ent) -> list[tuple[str, list[str] | None, str]]:
         """What a detector reports for one entity: ``(part id, links, category)``. Building walls and
@@ -660,6 +676,99 @@ class WorldSim:
             return [(ent.id, None, ent.category.value)]
         rest = [link.id for link in ent.rigid.links if link.id not in drawers]
         return [(ent.id, rest, ent.category.value)] + [(f"{ent.id}/{d}", [d], "drawer") for d in drawers]
+
+    def rgbd(self, robot_id: str, timeout: float = 10.0) -> bytes:
+        """One RGB-D frame of a robot's head camera as compressed ``npz`` bytes: ``rgb`` (H, W, 3)
+        uint8, ``depth`` (H, W) uint16 millimetres (0 = no reading), ``mask`` (H, W) uint8 anonymous
+        instance ids (0 = background; ids are shuffled every frame and carry no World State
+        identity), ``fovy`` and ``header`` (JSON: stamp, odometry, joints, gripper).
+
+        Rendering runs on the main thread like :meth:`render`."""
+        if threading.current_thread() is threading.main_thread():
+            return self._rgbd_now(robot_id)
+        request = _RenderRequest(None, 0, 0, robot=robot_id)
+        self._render_requests.put(request)
+        if not request.done.wait(timeout):
+            raise TimeoutError("rendering needs the main thread to call WorldSim.pump()")
+        if request.error is not None:
+            raise request.error
+        return request.png
+
+    def _rgbd_now(self, robot_id: str) -> bytes:
+        with self.lock:
+            header = self.sensors(robot_id)
+            header.pop("imaging", None)
+            header.pop("detections", None)
+            _, sensor = self.camera_pose(robot_id)
+            width, height = sensor["intrinsics"]["width"], sensor["intrinsics"]["height"]
+            key = (width, height)
+            if key not in self._renderers:
+                self._renderers[key] = mujoco.Renderer(self.model, height, width)
+            renderer = self._renderers[key]
+            renderer.update_scene(self.data, camera=self.robot_camera_name(robot_id))
+            rgb = renderer.render().copy()
+            renderer.enable_depth_rendering()
+            depth = renderer.render().copy()
+            renderer.disable_depth_rendering()
+            renderer.enable_segmentation_rendering()
+            seg = renderer.render().copy()
+            renderer.disable_segmentation_rendering()
+            part_of, transparent = self._geom_parts(robot_id)
+        geom = np.where(seg[..., 1] == int(mujoco.mjtObj.mjOBJ_GEOM), seg[..., 0], -1)
+        parts = np.where(geom >= 0, part_of[np.clip(geom, 0, None)], -1)
+        clear = np.where(geom >= 0, transparent[np.clip(geom, 0, None)], False)
+        mask = self._anonymous_masks(parts)
+        depth_mm = self._noisy_depth(depth, clear)
+        buf = io.BytesIO()
+        np.savez_compressed(buf, rgb=rgb, depth=depth_mm, mask=mask, fovy=np.float32(sensor["intrinsics"]["fovy"]),
+                            header=np.array(json.dumps(header)))
+        return buf.getvalue()
+
+    def _geom_parts(self, robot_id: str) -> tuple[np.ndarray, np.ndarray]:
+        """Per geom: the index of the perception part it belongs to (-1 for the floor and the
+        observing robot itself), and whether it is transparent."""
+        part_of = np.full(self.model.ngeom, -1, dtype=np.int32)
+        index = 0
+        for ent in self.template.entities:
+            if ent.id == robot_id:
+                continue
+            names = self.build.names[ent.id]
+            for _, links, _ in self.perception_parts(ent):
+                for bid in entity_body_ids(self.model, names, links):
+                    part_of[self.model.geom_bodyid == bid] = index
+                index += 1
+        transparent = self.model.geom_rgba[:, 3] < 0.5
+        return part_of, transparent
+
+    def _anonymous_masks(self, parts: np.ndarray) -> np.ndarray:
+        """Instance masks as a class-agnostic segmenter would give them: shuffled ids, ragged
+        boundaries, tiny fragments dropped."""
+        p = self.perception
+        mask = np.zeros(parts.shape, dtype=np.uint8)
+        present = [int(v) for v in np.unique(parts) if v >= 0]
+        ids = self.rng.permutation(np.arange(1, 256))[: len(present)]
+        for part, new_id in zip(present, ids, strict=False):
+            sel = parts == part
+            if self.rng.random() < p.mask_erode_prob:
+                inner = sel.copy()
+                inner[1:, :] &= sel[:-1, :]
+                inner[:-1, :] &= sel[1:, :]
+                inner[:, 1:] &= sel[:, :-1]
+                inner[:, :-1] &= sel[:, 1:]
+                sel = inner
+            if int(sel.sum()) >= p.min_mask_pixels:
+                mask[sel] = new_id
+        return mask
+
+    def _noisy_depth(self, depth: np.ndarray, clear: np.ndarray) -> np.ndarray:
+        """Depth in millimetres with range-dependent noise; transparent surfaces often give no reading."""
+        p = self.perception
+        valid = (depth > 0.05) & (depth < p.max_range)
+        sigma = p.depth_sigma_base + p.depth_sigma_quadratic * np.clip(depth - 0.4, 0.0, None) ** 2
+        sigma = np.where(clear, sigma * p.transparent_depth_noise, sigma)
+        noisy = depth + self.rng.normal(0.0, 1.0, depth.shape) * sigma
+        valid &= ~(clear & (self.rng.random(depth.shape) < p.transparent_depth_drop))
+        return np.where(valid, np.round(noisy * 1000.0), 0).astype(np.uint16)
 
     def _detection_targets(self, robot_id: str):
         for ent in self.template.entities:
@@ -773,7 +882,10 @@ class WorldSim:
             return
         while True:
             try:
-                request.png = self._render_now(request.camera, request.width, request.height, request.fmt)
+                if request.robot is not None:
+                    request.png = self._rgbd_now(request.robot)
+                else:
+                    request.png = self._render_now(request.camera, request.width, request.height, request.fmt)
             except Exception as exc:  # noqa: BLE001 - re-raised on the requesting thread
                 request.error = exc
             request.done.set()

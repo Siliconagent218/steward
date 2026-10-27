@@ -13,6 +13,10 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import numpy as np
+
+from steward.ego.classify import classify
+from steward.ego.perception import box_of, decode_rgbd, segments
 from steward.ego.esim import Esim, EsimConfig
 from steward.ego.estimator import SELF_ID, EgoEstimator
 from steward.ego.skills import MotionConfig, SkillExecutor
@@ -39,6 +43,10 @@ class RobotLink:
     def sensors(self) -> dict:
         return call("GET", f"{self.url}/sensors")
 
+    def rgbd(self) -> bytes:
+        """One RGB-D frame (``npz``) when the world provides raw imaging instead of detections."""
+        return call("GET", f"{self.url}/sensors/rgbd")
+
     def command(self, cmd: dict) -> None:
         call("POST", f"{self.url}/command", cmd)
 
@@ -63,6 +71,7 @@ class EgoRuntime:
         self.receipts: dict[str, dict] = {}
         self.last_error: str | None = None
         self.control_owner: str | None = None
+        self.perception_mode: str | None = None
         self.alerts: list[dict] = []
         self._alert_ids = itertools.count(1)
         self.executor = SkillExecutor(self.link.command, self._motion_state, self._mark_held, self.config.motion,
@@ -70,8 +79,9 @@ class EgoRuntime:
 
     # --------------------------------------------------------------- lifecycle
     def start(self) -> None:
+        """Start perception in a worker thread. The first frame is taken there too: RGB-D frames
+        are rendered on the world's main thread, which may be the caller."""
         self._running = True
-        self._poll_once()
         self._thread = threading.Thread(target=self._loop, name="ego-perception", daemon=True)
         self._thread.start()
 
@@ -82,6 +92,21 @@ class EgoRuntime:
 
     def _poll_once(self) -> None:
         frame = self.link.sensors()
+        mode = "rgbd" if frame.get("imaging") == "rgbd" else "detections"
+        if mode != self.perception_mode:
+            with self._lock:
+                if self.perception_mode is not None:
+                    # The sensors changed kind (a phase switch): objects are perceived afresh with
+                    # the new pipeline; what the gripper holds and the running skill are kept.
+                    self.estimator.forget_objects()
+                self.perception_mode = mode
+        if mode == "rgbd":
+            rgbd = decode_rgbd(self.link.rgbd())
+            with self._lock:
+                if rgbd["header"]["stamp"] < self.estimator.stamp - 1e-6:
+                    self._restart()
+                self.estimator.update_rgbd(rgbd)
+            return
         with self._lock:
             if frame["stamp"] < self.estimator.stamp - 1e-6:
                 self._restart()
@@ -172,6 +197,7 @@ class EgoRuntime:
                      "holding": held, "joints": {j.id: round(j.q.value[0], 3) for j in me.rigid.joints if j.q.value}},
             "objects": objects,
             "currentSkill": job,
+            "perception": self.perception_mode,
             "runtimeError": self.last_error,
         }
 
@@ -200,7 +226,18 @@ class EgoRuntime:
 
     def observe(self) -> dict:
         frame = self.link.sensors()
-        visible = [{"category": d["category"], "rangeM": round(d["range"], 2)} for d in frame["detections"]]
+        if frame.get("imaging") == "rgbd":
+            rgbd = decode_rgbd(self.link.rgbd())
+            with self._lock:
+                cam = self.estimator.camera_pose()
+            visible = []
+            for seg in segments(rgbd, cam):
+                centre, size, _ = box_of(seg.points)
+                probs = classify(size, centre[2] - size[2] / 2, seg.color, seg.invalid_frac)
+                best = max(probs, key=probs.get)
+                visible.append({"category": best, "confidence": round(probs[best], 2), "rangeM": round(seg.range, 2)})
+        else:
+            visible = [{"category": d["category"], "rangeM": round(d["range"], 2)} for d in frame["detections"]]
         out = {"t": frame["stamp"], "visible": visible}
         if self.out_dir is not None:
             self.out_dir.mkdir(parents=True, exist_ok=True)

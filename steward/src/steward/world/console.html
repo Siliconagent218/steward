@@ -103,6 +103,7 @@
     <option value="0.5">0.5×</option><option value="1">1×</option><option value="2">2×</option>
     <option value="4">4×</option><option value="8">8×</option>
   </select>
+  <select id="phase" title="功能级别：系统各模块运行在哪个 Phase 的实现上；运行中可切换，用于对比与调试"></select>
   <select id="fps" title="渲染帧率：世界视图、自我态视图与机器人相机每秒最多请求的帧数；控制台状态刷新最多每秒 5 次">
     <option value="25">25 fps</option><option value="10">10 fps</option><option value="5">5 fps</option>
     <option value="3">3 fps</option><option value="1">1 fps</option>
@@ -396,6 +397,7 @@ async function refresh() {
     if (key !== viewKey) { viewKey = key; view = presetView('south'); panes.world.rendered = panes.ego.rendered = null;
       requestRenders(); document.querySelectorAll('[data-view]').forEach(b => b.classList.toggle('on', b.dataset.view === 'south')); }
     $('clock').textContent = `t = ${state.t.toFixed(1)} s`;
+    renderPhase(state.phase);
     $('task').textContent = state.task ? `任务：${state.task}` : '';
     $('pause').textContent = state.paused ? '继续' : '暂停';
     if (document.activeElement !== $('speed')) $('speed').value = String(state.speed);
@@ -451,31 +453,62 @@ function drawMetrics() {
   const cm = v => v == null ? '–' : (v * 100).toFixed(2) + ' cm';
   const rows = [
     ['物体召回率', pct(m.recall)], ['误检数', m.falsePositives ?? '–'], ['平均位置误差', cm(m.meanPositionErrorM)],
+    ['平均尺寸误差', cm(m.meanSizeErrorM)],
     ['NEES（三维理论值 3）', m.meanNees3 == null ? '–' : m.meanNees3.toFixed(2)], ['类别准确率', pct(m.categoryAccuracy)],
     ['自定位误差', cm(m.selfPositionErrorM)], ['夹爪', `${holding.gripper || '–'}${holding.holding ? '，持有 ' + holding.holding : ''}`],
   ];
   $('metrics').innerHTML = rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
   const cv = $('chart'), ctx = cv.getContext('2d');
   ctx.clearRect(0, 0, cv.width, cv.height);
-  ctx.fillStyle = '#8b96a3'; ctx.font = '12px -apple-system, sans-serif'; ctx.textAlign = 'left';
-  ctx.fillText('平均位置误差（cm）随仿真时间', 8, 16);
+  ctx.font = '12px -apple-system, sans-serif'; ctx.textAlign = 'left';
+  const legend = [['#ff9f43', '位置误差'], ['#4aa3ff', '尺寸误差'], ['#3ecf8e', '召回率（右轴）']];
+  let lx = 8;
+  for (const [c, name] of legend) { ctx.fillStyle = c; ctx.fillRect(lx, 8, 10, 3); ctx.fillStyle = '#8b96a3'; ctx.fillText(name, lx + 14, 14); lx += ctx.measureText(name).width + 30; }
   const hist = (robot && robot.errorHistory) || [];
   if (hist.length < 2) return;
-  const t0 = hist[0][0], t1 = hist[hist.length - 1][0], maxE = Math.max(...hist.map(h => h[1])) * 100 || 1;
-  const x = t => 40 + (t - t0) / Math.max(t1 - t0, 1e-6) * (cv.width - 50);
-  const y = e => cv.height - 20 - (e * 100) / maxE * (cv.height - 45);
-  ctx.strokeStyle = '#2a313a'; ctx.beginPath(); ctx.moveTo(40, y(0)); ctx.lineTo(cv.width - 10, y(0)); ctx.stroke();
-  ctx.fillText(maxE.toFixed(1), 6, y(maxE / 100) + 4); ctx.fillText('0', 24, y(0) + 4);
-  ctx.strokeStyle = '#ff9f43'; ctx.lineWidth = 2; ctx.beginPath();
-  hist.forEach(([t, e], i) => i ? ctx.lineTo(x(t), y(e)) : ctx.moveTo(x(t), y(e)));
-  ctx.stroke();
+  const t0 = hist[0][0], t1 = hist[hist.length - 1][0];
+  const maxE = Math.max(...hist.map(h => Math.max(h[1] || 0, h[2] || 0))) * 100 || 1;
+  const x = t => 40 + (t - t0) / Math.max(t1 - t0, 1e-6) * (cv.width - 80);
+  const y = e => cv.height - 18 - (e * 100) / maxE * (cv.height - 40);
+  const yr = r => cv.height - 18 - r * (cv.height - 40);
+  ctx.strokeStyle = '#2a313a'; ctx.beginPath(); ctx.moveTo(40, y(0)); ctx.lineTo(cv.width - 40, y(0)); ctx.stroke();
+  ctx.fillStyle = '#8b96a3'; ctx.fillText(`${maxE.toFixed(1)} cm`, 2, y(maxE / 100) + 4); ctx.fillText('0', 26, y(0) + 4);
+  ctx.textAlign = 'right'; ctx.fillText('100%', cv.width - 2, yr(1) + 4); ctx.textAlign = 'left';
+  for (let i = 1; i < hist.length; i++) {
+    if (hist[i][4] !== hist[i - 1][4]) {
+      ctx.strokeStyle = '#ffffff55'; ctx.setLineDash([3, 3]); ctx.beginPath(); ctx.moveTo(x(hist[i][0]), 20); ctx.lineTo(x(hist[i][0]), cv.height - 18); ctx.stroke(); ctx.setLineDash([]);
+      ctx.fillStyle = '#c3ccd6'; ctx.fillText(hist[i][4] || '', x(hist[i][0]) + 3, 30);
+    }
+  }
+  const line = (k, color, scale) => {
+    ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.beginPath(); let started = false;
+    hist.forEach(h => { if (h[k] == null) return; const yy = scale(h[k]); if (started) ctx.lineTo(x(h[0]), yy); else { ctx.moveTo(x(h[0]), yy); started = true; } });
+    ctx.stroke();
+  };
+  line(1, '#ff9f43', y); line(2, '#4aa3ff', y); line(3, '#3ecf8e', yr);
 }
+let phaseKey = '';
+function renderPhase(phase) {
+  if (!phase) return;
+  const sel = $('phase');
+  const key = phase.levels.map(l => l.level).join(',');
+  if (key !== phaseKey) {
+    phaseKey = key;
+    sel.innerHTML = phase.levels.map(l => `<option value="${l.level}" title="${l.description}">${l.label}</option>`).join('');
+  }
+  if (document.activeElement !== sel) sel.value = phase.level;
+  const current = phase.levels.find(l => l.level === phase.level);
+  sel.title = `功能级别：${current ? current.description : ''}（运行中可切换）`;
+}
+$('phase').onchange = async () => {
+  try { await api('POST', '/wca/phase', { level: $('phase').value }); refresh(); } catch (e) { showError(e); }
+};
 function drawEvents() {
   const names = { 'grasp/attach': '抓取', 'grasp/release': '放下', 'grasp/miss': '抓空', 'episode/reset': 'Episode 重置',
-    'grasp/handle': '握住抽屉把手', 'grasp/handle-release': '松开抽屉把手' };
+    'grasp/handle': '握住抽屉把手', 'grasp/handle-release': '松开抽屉把手', 'phase/switch': '切换功能级别' };
   const edits = { move: '世界修改·移动', spawn: '世界修改·新增', remove: '世界修改·删除' };
   $('events').innerHTML = state.events.slice().reverse().map(e =>
-    `<li>t=${e.t.toFixed(1)} s　${(e.type === 'world/edit' && edits[e.action]) || names[e.type] || e.type}${e.entity ? '　' + e.entity : ''}${e.robot ? '（' + e.robot + '）' : ''}</li>`
+    `<li>t=${e.t.toFixed(1)} s　${(e.type === 'world/edit' && edits[e.action]) || names[e.type] || e.type}${e.entity ? '　' + e.entity : ''}${e.level ? '　' + e.level : ''}${e.robot ? '（' + e.robot + '）' : ''}</li>`
   ).join('') || '<li>暂无</li>';
 }
 

@@ -79,6 +79,13 @@ def row_offsets(widths: list[float], gap: float = ROW_GAP) -> list[float]:
     return out
 
 
+def _offset(support: dict, along: float, across: float) -> list[float]:
+    """An offset in the support's frame with ``along`` on its longer horizontal side, whichever
+    local axis that is (asset frames and fitted boxes differ)."""
+    e = support["extentM"] or support["sizeM"]
+    return [along, across] if e[0] >= e[1] else [across, along]
+
+
 def _local(support: dict, xy: list[float]) -> tuple[float, float]:
     yaw = math.radians(support["yawDeg"])
     dx, dy = xy[0] - support["position"][0], xy[1] - support["position"][1]
@@ -198,11 +205,12 @@ class Chores:
         for obj, x in zip(items, offsets, strict=True):
             obj = _refresh(self.api, obj)
             order.append(obj["id"])
+            want = _offset(table, x, TABLE_ROW_Y)
             lx, ly = _local(table, obj["position"])
-            if obj["on"] == table["id"] and abs(lx - x) < 0.03 and abs(ly - TABLE_ROW_Y) < 0.03:
+            if obj["on"] == table["id"] and abs(lx - want[0]) < 0.03 and abs(ly - want[1]) < 0.03:
                 continue
-            self._clearing("table", lambda o=obj, x=x: _move(self.api, o, {"on": table["id"], "offset": [x, TABLE_ROW_Y]},
-                                                              table, self.log, self.timeout_s))
+            self._clearing("table", lambda o=obj, w=want: _move(self.api, o, {"on": table["id"], "offset": w},
+                                                                 table, self.log, self.timeout_s))
             self._step("table", f"{obj.get('color') or ''} {obj['category']} → 餐桌第 {len(order)} 位", object=obj["id"])
         return order
 
@@ -222,7 +230,7 @@ class Chores:
                 offset = next(slot)
                 if bowl["on"] != board["id"]:
                     self._clearing("sideboard", lambda b=bowl, o=offset: _move(
-                        self.api, b, {"on": board["id"], "offset": [0.0, o]}, board, self.log, self.timeout_s))
+                        self.api, b, {"on": board["id"], "offset": _offset(board, o, 0.0)}, board, self.log, self.timeout_s))
                     self._step("sideboard", f"{bowl.get('color') or ''} 碗 → 餐边柜（叠放底座）", object=bowl["id"])
             else:
                 below = _refresh(self.api, below)
@@ -238,7 +246,7 @@ class Chores:
             if obj["on"] == board["id"]:
                 continue
             self._clearing("sideboard", lambda o=obj, off=offset: _move(
-                self.api, o, {"on": board["id"], "offset": [0.0, off]}, board, self.log, self.timeout_s))
+                self.api, o, {"on": board["id"], "offset": _offset(board, off, 0.0)}, board, self.log, self.timeout_s))
             self._step("sideboard", f"{obj['category']} → 餐边柜", object=obj["id"])
 
     # ----------------------------------------------------------------- drawers

@@ -24,8 +24,9 @@ from steward.net import Binary, HttpError, JsonServer
 from steward.observer.observer import Observer
 from steward.world.console import CONSOLE_HTML, console_state
 from steward.world.ego_view import EgoViewRenderer
+from steward.phases import DEFAULT_PHASE, phase_catalog, phase_modules
 from steward.world.chat import ChatConfig, HarnessChat
-from steward.world.sim import EditError, WorldSim
+from steward.world.sim import EditError, PerceptionConfig, WorldSim
 
 
 def image_format(query: dict) -> str:
@@ -47,7 +48,9 @@ class _MainTask:
 class StewardHost:
     def __init__(self, root: Path | str, *, scenario: str | None = None, speed: float = 1.0, seed: int = 0,
                  run_dir: Path | None = None, wca_port: int = 0, robot_ports: dict[str, int] | None = None,
-                 chat: ChatConfig | None = None):
+                 chat: ChatConfig | None = None, phase: str = DEFAULT_PHASE):
+        phase_modules(phase)
+        self.phase = phase
         self.authoring = AuthoringService(root)
         self.chat = HarnessChat(chat, lambda: self.wca.url)
         self.speed = speed
@@ -55,7 +58,7 @@ class StewardHost:
         self.run_dir = run_dir
         self.sim: WorldSim | None = None
         self.scenario: dict | None = None
-        self.observer = Observer(self._require_sim, run_dir)
+        self.observer = Observer(self._require_sim, run_dir, phase=lambda: self.phase)
         self.wca = JsonServer(self._wca_routes(), port=wca_port, name="wca")
         self._robot_port_config = robot_ports or {}
         self.robot_servers: dict[str, JsonServer] = {}
@@ -69,7 +72,8 @@ class StewardHost:
         scenario = self.authoring.load_scenario(name)
         if self.sim is not None:
             self.sim.stop()
-        self.sim = WorldSim(scenario["sceneState"], speed=self.speed, seed=self.seed)
+        self.sim = WorldSim(scenario["sceneState"], speed=self.speed, seed=self.seed,
+                            perception=PerceptionConfig(mode=phase_modules(self.phase)["perception"]))
         self.scenario = scenario
         self.observer.reset()
         for rid in scenario["robots"]:
@@ -78,6 +82,19 @@ class StewardHost:
                 self.robot_servers[rid] = server.start()
         return {"scenario": name, "robots": {rid: self.robot_servers[rid].url for rid in scenario["robots"]},
                 "task": scenario["task"]}
+
+    def set_phase(self, level: str) -> dict:
+        """Switch the running system to a phase level (module implementations), effective with the
+        next sensor frame; later episodes start at the same level."""
+        modules = phase_modules(level)
+        self.phase = level
+        if self.sim is not None:
+            self.sim.perception.mode = modules["perception"]
+            self.sim.events.append({"t": self.sim.time, "type": "phase/switch", "level": level})
+        return self.phase_state()
+
+    def phase_state(self) -> dict:
+        return {"level": self.phase, "levels": phase_catalog()}
 
     def _require_sim(self) -> WorldSim:
         if self.sim is None:
@@ -240,12 +257,20 @@ class StewardHost:
             ("GET", "/scenarios"): guard(lambda q, b: {"scenarios": a.list_scenarios()}),
             ("POST", "/scenarios/save"): guard(lambda q, b: a.save_scenario(b)),
             ("POST", "/wca/edit"): guard(lambda q, b: self.edit(b)),
+            ("GET", "/wca/phase"): guard(lambda q, b: self.phase_state()),
+            ("POST", "/wca/phase"): guard(lambda q, b: self._set_phase_request(b)),
             ("GET", "/console/chat"): guard(lambda q, b: self.chat.state(int(q.get("since", 0)))),
             ("POST", "/console/chat"): guard(lambda q, b: self.chat.send(b.get("agent", "world"), b.get("message", ""))),
             ("POST", "/console/chat/reset"): guard(lambda q, b: self.chat.reset(b.get("agent", "world"))),
             ("POST", "/console/chat/stop"): guard(lambda q, b: self.chat.cancel(b.get("agent", "world"))),
             ("POST", "/console/alerts/ack"): guard(lambda q, b: self.chat.acknowledge_alerts()),
         }
+
+    def _set_phase_request(self, body: dict) -> dict:
+        try:
+            return self.set_phase(str(body.get("level", "")))
+        except ValueError as exc:
+            raise HttpError(400, str(exc)) from None
 
     # -------------------------------------------------------------- edits
     def edit(self, request: dict) -> dict:
@@ -304,6 +329,7 @@ class StewardHost:
 
         return {
             ("GET", "/sensors"): lambda q, b: self._require_sim().sensors(rid),
+            ("GET", "/sensors/rgbd"): lambda q, b: Binary(self._require_sim().rgbd(rid), "application/octet-stream"),
             ("GET", "/camera/rgb"): camera,
             ("POST", "/command"): lambda q, b: self._require_sim().command(rid, b or {}),
             ("POST", "/telemetry"): telemetry,

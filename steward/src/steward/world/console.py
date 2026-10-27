@@ -44,10 +44,12 @@ def console_state(host) -> dict:
         robots[rid] = {
             "ego": _ego_view(ego) if ego else None,
             "metrics": {k: record.get(k) for k in ("t", "recall", "falsePositives", "meanPositionErrorM",
-                                                    "meanNees3", "categoryAccuracy", "selfPositionErrorM")},
+                                                    "meanSizeErrorM", "meanNees3", "categoryAccuracy",
+                                                    "selfPositionErrorM", "phase")},
             "matches": record.get("matches", {}),
-            "errorHistory": [[round(h["t"], 2), h["meanPositionErrorM"]] for h in host.observer.history.get(rid, [])
-                             if h.get("meanPositionErrorM") is not None][-300:],
+            "errorHistory": [[round(h["t"], 2), h["meanPositionErrorM"], h.get("meanSizeErrorM"), h.get("recall"),
+                              h.get("phase")]
+                             for h in host.observer.history.get(rid, []) if h.get("meanPositionErrorM") is not None][-300:],
             "camera": f"robot:{rid}",
         }
     floor = next((g for g in ground_truth if g["category"] == "floor"), None)
@@ -58,6 +60,7 @@ def console_state(host) -> dict:
         "view": {"lookat": [round(cx, 3), round(cy, 3), 0.5], "distance": round(span * 1.35, 3), "azimuth": 90.0,
                  "elevation": -50.0, "fovy": sim.free_camera_fovy},
         "scenario": (host.scenario or {}).get("name"),
+        "phase": host.phase_state(),
         "task": (host.scenario or {}).get("task"),
         "t": round(status["t"], 2),
         "paused": status["paused"],

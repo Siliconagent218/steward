@@ -19,6 +19,8 @@ import threading
 import time
 from pathlib import Path
 
+from steward.phases import DEFAULT_PHASE, PHASES
+
 STEWARD_DIR = Path(__file__).resolve().parents[2]
 DEFAULT_ROOT = STEWARD_DIR / "var" / "steward"
 
@@ -56,7 +58,8 @@ def _host(args, run_dir: Path):
 
     ports = {"w:robot-1": args.robot_port} if getattr(args, "robot_port", 0) else {}
     return StewardHost(args.root, scenario=args.scenario, speed=args.speed, seed=args.seed, run_dir=run_dir,
-                       wca_port=args.wca_port, robot_ports=ports, chat=_chat_config(args)).start()
+                       wca_port=args.wca_port, robot_ports=ports, chat=_chat_config(args),
+                       phase=args.phase).start()
 
 
 def _chat_config(args):
@@ -365,6 +368,8 @@ def main(argv: list[str] | None = None) -> int:
         in_process = name in ("demo", "shuttle", "chores")
         p.add_argument("--speed", type=float, default=4.0 if in_process else 1.0)
         p.add_argument("--seed", type=int, default=0)
+        p.add_argument("--phase", choices=sorted(PHASES), default=DEFAULT_PHASE,
+                       help="phase level of the replaceable modules (switchable at run time from the console)")
         p.add_argument("--wca-port", type=int, default=0 if in_process else 7400)
         p.add_argument("--robot-port", type=int, default=0 if in_process else 7410)
         if not in_process:

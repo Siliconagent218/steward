@@ -20,6 +20,9 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from steward.ego.classify import prototype
+from steward.ego.classify import classify
+from steward.ego.perception import box_of, segments
 from steward.ego.planner import Box2D, protrusion
 from steward.ego.priors import compatible, prior
 from steward.math3d import pose_compose, pose_inverse, quat_from_yaw, wrap_angle, yaw_from_quat
@@ -44,6 +47,9 @@ class Track:
     held: bool = False
     held_offset: np.ndarray | None = None
     color_counts: dict[str, float] = field(default_factory=dict)
+    voxels: np.ndarray | None = None  # 1 cm voxels of every surface seen of this object (RGB-D mode)
+    completion: float = 0.0  # how far the box was extended beyond what was seen (shape prior)
+    settled: bool = True  # False right after the robot put it down, until it is seen again
 
     @property
     def category(self) -> str:
@@ -76,6 +82,8 @@ class EstimatorConfig:
     gate_m: float = 0.30
     size_gate_ratio: float = 0.25
     size_match_log: float = 0.15
+    voxels_max: int = 6000
+    points_per_cloud: int = 150
     missed_decay: float = 0.97
     drop_below: float = 0.05
     max_range: float = 8.0
@@ -95,6 +103,7 @@ class EgoEstimator:
         self.joints: dict[str, float] = {}
         self.gripper = {"state": "open", "holding": False}
         self.held_id: str | None = None
+        self._rng = np.random.default_rng(0)
         self._self_template = self._make_self_template()
         self._head_mount, self._camera = self._camera_model()
 
@@ -160,6 +169,245 @@ class EgoEstimator:
         self._merge_duplicates()
         self._follow_held()
         self.version += 1
+
+    # ------------------------------------------------------------- RGB-D path
+    def update_rgbd(self, frame: dict) -> None:
+        """Fuse one decoded RGB-D frame: segment it, measure every region, associate regions with
+        tracks by position, size and category, and rebuild each matched track's box from the
+        points it has accumulated over recent views."""
+        header = frame["header"]
+        self.stamp = float(header["stamp"])
+        self.odometry = header["odometry"]
+        self.joints = header["joints"]
+        self.gripper = header["gripper"]
+        if not self.gripper.get("holding"):
+            self._clear_held()
+        self._follow_held()
+        cam = self.camera_pose()
+        cam_p = np.asarray(cam["p"])
+        measurements = []
+        for seg in segments(frame, cam, rng=self._rng):
+            centre, size, yaw = box_of(seg.points)
+            probs = classify(size, centre[2] - size[2] / 2, seg.color, seg.invalid_frac)
+            measurements.append({"seg": seg, "centre": centre, "size": size, "yaw": yaw, "probs": probs,
+                                 "footprint": float(max(size[0], size[1]))})
+        pairs = []
+        held = self.tracks.get(self.held_id) if self.held_id else None
+        for i, m in enumerate(measurements):
+            # What the robot is carrying moves with it: a region at the load belongs to the load,
+            # never to a neighbour it is carried past.
+            at_load = held is not None and float(np.linalg.norm(held.pos - m["centre"])) < 0.15
+            for track in self.tracks.values():
+                if at_load and track is not held:
+                    continue
+                d = float(np.linalg.norm(track.pos - m["centre"]))
+                # Neighbouring tableware stands ~0.2 m apart: the gate scales with the object size.
+                spread = 3.0 * math.sqrt(float(np.mean(track.var[:2])))
+                gate = max(0.10, 0.6 * max(track.footprint, m["footprint"]) + spread, 0.45 if track.held else 0.0)
+                # A part of a large object (a table top seen up close, one end of a counter) lies inside
+                # its box and below its top; something standing on it starts at or above the top.
+                m_bottom, m_top = m["centre"][2] - m["size"][2] / 2, m["centre"][2] + m["size"][2] / 2
+                part_of_large = track.footprint > 0.3 and _inside(track, m["centre"], 0.1) \
+                    and m_top <= track.top() + 0.1 and m_bottom < track.top() - 0.02
+                if d > gate and not part_of_large:
+                    continue
+                size_r = 0.0 if track.held or part_of_large else \
+                    abs(math.log(max(m["footprint"], 1e-3) / max(track.footprint, 1e-3)))
+                if size_r > 0.9:
+                    continue
+                if not track.held and not part_of_large and self._contradicts(track, m):
+                    continue
+                if (track.category == "wall") != (m["probs"].get("wall", 0.0) > 0.5) and \
+                        (track.footprint > 0.3 or m["footprint"] > 0.3):
+                    continue  # walls only join walls
+                if not track.held and track.settled and track.footprint < 0.3 and track.observations > 2 \
+                        and not (track.bottom() - 0.03 <= m_bottom <= track.bottom() + 0.06):
+                    continue  # a small object resting somewhere keeps its base height
+                d = min(d, gate * 0.5) if part_of_large else d
+                total = sum(track.category_counts.values()) or 1.0
+                overlap = sum(min(m["probs"].get(k, 0.0), v / total) for k, v in track.category_counts.items())
+                pairs.append((d / gate + 0.8 * size_r + 0.4 * (1.0 - overlap), i, track.id))
+        matched, used = set(), set()
+        for _, i, tid in sorted(pairs):
+            if i in used or tid in matched:
+                continue
+            used.add(i)
+            matched.add(tid)
+            self._fuse_cloud(self.tracks[tid], measurements[i], cam_p)
+        for i, m in enumerate(measurements):
+            if i not in used and not m["seg"].border:
+                track = self._new_cloud_track(m, cam_p)
+                matched.add(track.id)
+        self._decay_unseen_rgbd(cam, matched, frame)
+        self._merge_parts(cam_p)
+        self._merge_same_surface(cam_p)
+        self._follow_held()
+        self.version += 1
+
+    def _decay_unseen_rgbd(self, cam: dict, matched: set[str], frame: dict) -> None:
+        """Lower the existence of tracks that should be in view but were not segmented: their centre
+        projects into the image with a depth reading at about their distance (not occluded by
+        something nearer, not beyond the sensor)."""
+        depth = frame["depth"]
+        h, w = depth.shape
+        f = (h / 2.0) / math.tan(math.radians(frame["fovy"]) / 2.0)
+        inv = pose_inverse(cam)
+        for tid in list(self.tracks):
+            track = self.tracks[tid]
+            if tid in matched or track.held or self._in_closed_drawer(track):
+                continue
+            x, y, z = pose_compose(inv, {"p": track.pos.tolist(), "q": [1, 0, 0, 0]})["p"]
+            if x < 0.3 or x > self.config.max_range * 0.8:
+                continue
+            u, v = int(round((w - 1) / 2 - y * f / x)), int(round((h - 1) / 2 - z * f / x))
+            if not (0 <= u < w and 0 <= v < h):
+                continue
+            seen = float(depth[v, u])
+            if seen <= 0.05 or seen < x - max(0.15, track.footprint / 2):
+                continue  # no reading, or something nearer hides it
+            track.existence *= self.config.missed_decay
+            if track.existence < self.config.drop_below:
+                del self.tracks[tid]
+
+    def _merge_same_surface(self, cam_p: np.ndarray) -> None:
+        """Merge tracks whose accumulated points lie on the same surfaces (duplicates from views
+        that were not associated). Nested bowls are different surfaces and stay apart."""
+        tracks = [t for t in self.tracks.values() if t.voxels is not None and not t.held]
+        for i, a in enumerate(tracks):
+            for b in tracks[i + 1:]:
+                if a.id not in self.tracks or b.id not in self.tracks:
+                    continue
+                if float(np.linalg.norm(a.pos - b.pos)) > 0.5 * max(a.footprint, b.footprint) + 0.05:
+                    continue
+                receptacles = "receptacle" in prior(a.category)["affordances"] and \
+                    "receptacle" in prior(b.category)["affordances"]
+                if receptacles and not self._size_match(a.footprint, b.footprint):
+                    continue  # a smaller bowl nested in a larger one
+                shared = {tuple(v) for v in a.voxels} & {tuple(v) for v in b.voxels}
+                if len(shared) < 0.5 * min(len(a.voxels), len(b.voxels)):
+                    continue
+                keep, drop = (a, b) if a.observations >= b.observations else (b, a)
+                keep.voxels = self._union(keep.voxels, drop.voxels)
+                for cat, n in drop.category_counts.items():
+                    keep.category_counts[cat] = keep.category_counts.get(cat, 0.0) + n
+                for col, n in drop.color_counts.items():
+                    keep.color_counts[col] = keep.color_counts.get(col, 0.0) + n
+                keep.observations += drop.observations
+                keep.existence = max(keep.existence, drop.existence)
+                del self.tracks[drop.id]
+                self._rebuild_geometry(keep, cam_p, 2.0)
+
+    @staticmethod
+    def _contradicts(track: Track, m: dict) -> bool:
+        """A floor-standing track and a clearly raised region (or the reverse) are not the same
+        object, for example a cabinet and the drawer at its top. Category disagreement alone is
+        only a cost: partial views of glass are often misclassified."""
+        m_bottom = m["centre"][2] - m["size"][2] / 2
+        return (track.bottom() < 0.05 and m_bottom > 0.3) or (track.bottom() > 0.3 and m_bottom < 0.05)
+
+    def _merge_parts(self, cam_p: np.ndarray) -> None:
+        """Fold a track into a larger one (furniture, walls) when it lies inside the larger box at
+        the same base height: both were partial views of the same object."""
+        for big in sorted(self.tracks.values(), key=lambda t: -t.footprint):
+            if big.id not in self.tracks or big.footprint <= 0.3 or big.held or big.category == "wall":
+                continue
+            for small in list(self.tracks.values()):
+                if small.id == big.id or small.held or small.footprint >= big.footprint:
+                    continue
+                if not _inside(big, small.pos, 0.1) or abs(small.bottom() - big.bottom()) > 0.15:
+                    continue
+                if small.footprint < 0.3 and small.bottom() > 0.05:
+                    continue  # tableware on furniture is not part of it
+                if small.voxels is not None:
+                    big.voxels = self._union(big.voxels, small.voxels)
+                for cat, n in small.category_counts.items():
+                    big.category_counts[cat] = big.category_counts.get(cat, 0.0) + n
+                big.observations += small.observations
+                big.existence = max(big.existence, small.existence)
+                del self.tracks[small.id]
+                if big.voxels is not None:
+                    self._rebuild_geometry(big, cam_p, 2.0)
+
+    def _new_cloud_track(self, m: dict, cam_p: np.ndarray) -> Track:
+        track = Track(id=f"e:{next(self._ids)}", category_counts=dict(m["probs"]), pos=m["centre"].copy(),
+                      var=np.full(3, 0.05**2), yaw=m["yaw"], yaw_var=0.1**2, size=m["size"].copy(), observations=0,
+                      first_seen=self.stamp, last_seen=self.stamp)
+        self.tracks[track.id] = track
+        self._fuse_cloud(track, m, cam_p)
+        return track
+
+    def _fuse_cloud(self, track: Track, m: dict, cam_p: np.ndarray) -> None:
+        seg = m["seg"]
+        for cat, prob in m["probs"].items():
+            track.category_counts[cat] = track.category_counts.get(cat, 0.0) + prob
+        name = color_name(seg.color, seg.invalid_frac)
+        track.color_counts[name] = track.color_counts.get(name, 0.0) + 1.0
+        track.observations += 1
+        track.last_seen = self.stamp
+        track.existence = min(1.0, track.existence + 0.2 * (1.0 - track.existence))
+        if track.held:
+            return
+        track.settled = True
+        if track.observations > 2 and track.voxels is not None:
+            grown = box_of(np.vstack([_points(track.voxels), seg.points]))[1]
+            if max(grown[0], grown[1]) > 1.5 * max(track.footprint, 0.05) and track.footprint < 0.3:
+                return  # the region would swell an established box: not this object's surface
+            if track.category == "wall" and min(grown[0], grown[1]) > 0.35:
+                return  # a second wall around a corner, not this wall
+        points = seg.points
+        if len(points) > self.config.points_per_cloud:
+            points = points[self._rng.choice(len(points), self.config.points_per_cloud, replace=False)]
+        track.voxels = self._union(track.voxels, _voxelize(points))
+        self._rebuild_geometry(track, cam_p, seg.range)
+
+    def _union(self, a: np.ndarray | None, b: np.ndarray) -> np.ndarray:
+        merged = b if a is None else np.unique(np.vstack([a, b]), axis=0)
+        if len(merged) > self.config.voxels_max:
+            merged = merged[self._rng.choice(len(merged), self.config.voxels_max, replace=False)]
+        return merged
+
+    def _rebuild_geometry(self, track: Track, cam_p: np.ndarray, rng_m: float) -> None:
+        """Box from the accumulated points, completed with the category's prior size along the
+        directions not yet seen; the variance shrinks with views and grows with completion."""
+        centre, size, yaw = box_of(_points(track.voxels), trim=0.01)
+        proto = prototype(track.category) if track.category_counts else None
+        shift = np.zeros(3)
+        completion = 0.0
+        total = sum(track.category_counts.values())
+        if proto is not None and track.category_counts[track.category] / total > 0.6:
+            long_side, short_side, height = proto
+            axes = [(0, long_side, np.array([math.cos(yaw), math.sin(yaw), 0.0])),
+                    (1, short_side, np.array([-math.sin(yaw), math.cos(yaw), 0.0]))]
+            away = centre - cam_p
+            view = away[:2] / max(float(np.linalg.norm(away[:2])), 1e-6)
+            for k, want, axis in axes:
+                # Only the extent along the viewing direction hides behind the visible surface; the
+                # extent across it is the silhouette and is seen in full.
+                if abs(float(view @ axis[:2])) < 0.3:
+                    continue
+                if size[k] < 0.85 * want:
+                    grow = want - size[k]
+                    shift += axis * (grow / 2.0) * (1.0 if float(away @ axis) >= 0 else -1.0)
+                    size[k] = want
+                    completion = max(completion, grow)
+            if size[2] < 0.85 * height:
+                grow = height - size[2]
+                bottom = centre[2] - size[2] / 2
+                if bottom < 0.15:
+                    shift[2] = height / 2.0 - centre[2]  # floor-standing: the base is on the floor
+                else:
+                    shift[2] = grow / 2.0  # resting on something: the unseen part is above
+                size[2] = height
+                completion = max(completion, grow)
+        track.pos = centre + shift
+        track.size = size
+        track.yaw = yaw
+        track.completion = completion
+        sigma_depth = self.config.pos_sigma_base + self.config.pos_sigma_per_m * 0.5 * rng_m
+        views = max(1, min(track.observations, 20))
+        var_xy = sigma_depth**2 / views + (completion / 4.0) ** 2 + 0.002**2
+        track.var = np.array([var_xy, var_xy, sigma_depth**2 / views + 0.002**2])
+        track.yaw_var = 0.05**2 / views
 
     def _gate(self, track: Track, sigma: float) -> float:
         """Association gate: measurement and track uncertainty, widened for large objects whose
@@ -272,6 +520,13 @@ class EgoEstimator:
             if track.existence < self.config.drop_below:
                 del self.tracks[tid]
 
+    def forget_objects(self) -> None:
+        """Drop every perceived object except the one in the gripper (used when the kind of sensor
+        data changes and objects must be perceived afresh)."""
+        held = self.tracks.get(self.held_id) if self.held_id else None
+        self.tracks = {held.id: held} if held is not None else {}
+        self.version += 1
+
     # ---------------------------------------------------------------- holding
     def mark_held(self, track_id: str) -> None:
         track = self.tracks[track_id]
@@ -284,6 +539,8 @@ class EgoEstimator:
             track = self.tracks[self.held_id]
             track.held = False
             track.held_offset = None
+            track.voxels = None
+            track.settled = False  # it drops a little when released; the next view places it
             track.var = np.maximum(track.var, 0.02**2)
         self.held_id = None
 
@@ -334,7 +591,10 @@ class EgoEstimator:
             return []
         carried = [t.id for t in self.tracks.values() if t.id != track_id and not t.held and self.support_of(t) is track]
         for tid in [track_id, *carried]:
-            self.tracks[tid].pos = self.tracks[tid].pos + np.asarray(delta, float)
+            moved = self.tracks[tid]
+            moved.pos = moved.pos + np.asarray(delta, float)
+            if moved.voxels is not None:
+                moved.voxels = _voxelize(_points(moved.voxels) + np.asarray(delta, float))
         self.version += 1
         return carried
 
@@ -395,6 +655,40 @@ class EgoEstimator:
             existence=round(track.existence, 4),
             state_vars={"color": Est(value=track.color, src=src)} if track.color else {},
         )
+
+
+_COLORS = {"red": (0.85, 0.15, 0.15), "green": (0.15, 0.70, 0.25), "blue": (0.15, 0.35, 0.90),
+           "black": (0.06, 0.06, 0.07), "white": (0.95, 0.95, 0.96), "gray": (0.60, 0.62, 0.65),
+           "brown": (0.58, 0.40, 0.24), "beige": (0.80, 0.67, 0.50), "yellow": (0.90, 0.85, 0.20)}
+
+
+def color_name(rgb: np.ndarray, invalid_frac: float = 0.0) -> str:
+    """Nearest named colour of a measured mean colour; surfaces without depth readings that look
+    pale are reported as clear."""
+    rgb = np.asarray(rgb, float)
+    value, low = float(rgb.max()), float(rgb.min())
+    if invalid_frac > 0.15 and value > 0.55 and (value - low) / max(value, 1e-6) < 0.25:
+        return "clear"
+    # Lighting darkens surfaces: compare chromaticity scaled to the measured brightness.
+    best, best_d = "gray", math.inf
+    for name, ref in _COLORS.items():
+        ref = np.asarray(ref)
+        scale = max(value, 1e-3) / max(float(ref.max()), 1e-3)
+        d = float(np.sum((rgb - ref * min(scale, 1.4)) ** 2))
+        if d < best_d:
+            best, best_d = name, d
+    return best
+
+
+VOXEL = 0.01
+
+
+def _voxelize(points: np.ndarray) -> np.ndarray:
+    return np.unique(np.floor(points / VOXEL).astype(np.int32), axis=0)
+
+
+def _points(voxels: np.ndarray) -> np.ndarray:
+    return (voxels.astype(np.float64) + 0.5) * VOXEL
 
 
 def _box2d(track: Track) -> Box2D:

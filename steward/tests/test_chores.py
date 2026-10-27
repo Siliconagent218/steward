@@ -139,8 +139,9 @@ def test_a_chair_is_carried_and_put_down_on_the_floor(kitchen_root, tmp_path):
         _explore(api.url, 120)
         chairs = [o for o in call("GET", f"{api.url}/ego/summary")["objects"] if o["category"] == "chair"]
         assert len(chairs) == 1
+        _approach_to_observe(api.url, chairs[0])
         assert run("pick", {"target": chairs[0]["id"]})["state"] == "succeeded"
-        assert run("place", {"at": [-2.05, 0.05], "yaw": math.pi})["state"] == "succeeded"
+        assert run("place", {"at": [-2.05, 0.05]})["state"] == "succeeded"
         pose = host.sim._entity_pose("w:chair-1")
         assert pose["p"][0] == pytest.approx(-2.05, abs=0.04) and pose["p"][1] == pytest.approx(0.05, abs=0.04)
         assert pose["p"][2] == pytest.approx(0.0, abs=0.01), "the chair stands on the floor"

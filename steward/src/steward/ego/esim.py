@@ -203,10 +203,14 @@ class Esim:
                 lbox, _, _ = entity_box(load)
                 # The load already stands where it is: check the back-out with its physical size (the ES
                 # box carries a 2-sigma margin) less a small tolerance for sliding past a neighbour.
-                shrink = self._sigma_xy(load) + 0.02
-                after = (self.tool_offset + reach, 0.0, lbox.yaw - yaw, max(lbox.hx - shrink, 0.05),
-                         max(lbox.hy - shrink, 0.05))
-                retreat = self._retreat(load_free, dock, (nx, ny), yaw, after, cfg.predock_backoff)
+                sigma = self._sigma_xy(load)
+                # Sliding past a neighbour may use a small tolerance; the turning room must be judged
+                # with the same box the carry predictions will use after the grasp.
+                slide = (self.tool_offset + reach, 0.0, lbox.yaw - yaw, max(lbox.hx - sigma - 0.02, 0.05),
+                         max(lbox.hy - sigma - 0.02, 0.05))
+                turn = (self.tool_offset + reach, 0.0, lbox.yaw - yaw, max(lbox.hx - sigma, 0.05),
+                        max(lbox.hy - sigma, 0.05))
+                retreat = self._retreat(load_free, dock, (nx, ny), yaw, slide, cfg.predock_backoff, turn)
                 if retreat is None:
                     reasons.append(f"side {normal}: carrying {load.id} from here the robot could not back out to "
                                    "a spot with room to turn")
@@ -320,10 +324,11 @@ class Esim:
         return self._held_relative(es)
 
     def _retreat(self, obstacles: list[Box2D], start: tuple[float, float], direction: tuple[float, float],
-                 yaw: float, carry: tuple, min_d: float) -> tuple[float, float] | None:
+                 yaw: float, carry: tuple, min_d: float, turn_carry: tuple | None = None) -> tuple[float, float] | None:
         """Nearest point at least ``min_d`` along ``direction`` (heading unchanged) that the robot can
-        reach in a straight line with its load and where it has room to turn with it."""
-        sweep = self._sweep(carry)
+        reach in a straight line with its load and where it has room to turn with it (judged with
+        ``turn_carry`` when given)."""
+        sweep = self._sweep(turn_carry or carry)
         d = 0.0
         while d <= self.config.carry_retreat_max + 1e-9:
             xy = (start[0] + direction[0] * d, start[1] + direction[1] * d)
