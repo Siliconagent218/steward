@@ -302,14 +302,52 @@ function project(frame, p) {
   return [RENDER_W / 2 + frame.f * x / z, RENDER_H / 2 - frame.f * y / z];
 }
 function painter(ctx, frame) {
+  const labels = [];
   return {
     line(a, b) { const pa = project(frame, a), pb = project(frame, b);
       if (pa && pb) { ctx.beginPath(); ctx.moveTo(pa[0], pa[1]); ctx.lineTo(pb[0], pb[1]); ctx.stroke(); } },
-    text(p, s, color) { const q = project(frame, p); if (!q) return;
-      ctx.font = '600 20px -apple-system, sans-serif'; ctx.textAlign = 'center';
-      ctx.lineWidth = 4; ctx.strokeStyle = '#0b0e12cc'; ctx.strokeText(s, q[0], q[1]);
-      ctx.fillStyle = color; ctx.fillText(s, q[0], q[1]); },
+    // Labels are collected and placed together by flush(), so that none overlaps another.
+    text(p, s, color) { const q = project(frame, p); if (q) labels.push({ q, s, color }); },
+    flush() { placeLabels(ctx, labels); labels.length = 0; },
   };
+}
+const LABEL_FONT = '600 20px -apple-system, sans-serif', LABEL_H = 24;
+const LABEL_ROWS = [0, -1, 1, -2, 2, -3, 3, -4, 4, -5, 5, -6, 6];
+const LABEL_SIDES = [0, -1, 1, -2, 2];
+function placeLabels(ctx, labels) {
+  // Nearer objects (lower on screen in these oblique views) take their own spot first; the others
+  // move up or down by whole rows or half a label sideways to the first free spot, joined to their
+  // object by a leader line. A label with no free spot within reach is left out rather than drawn
+  // over another one.
+  ctx.font = LABEL_FONT;
+  const placed = [], W = ctx.canvas.width, H = ctx.canvas.height;
+  const free = (r) => r.x >= 0 && r.y >= 0 && r.x + r.w <= W && r.y + r.h <= H
+    && !placed.some(o => r.x < o.x + o.w && o.x < r.x + r.w && r.y < o.y + o.h && o.y < r.y + r.h);
+  for (const l of [...labels].sort((a, b) => b.q[1] - a.q[1])) {
+    const w = ctx.measureText(l.s).width + 10;
+    search: for (const row of LABEL_ROWS) {
+      for (const side of LABEL_SIDES) {
+        const r = { x: l.q[0] + side * (w / 2 + 6) - w / 2, y: l.q[1] + row * (LABEL_H + 2) - LABEL_H / 2, w, h: LABEL_H };
+        if (free(r)) { placed.push(r); l.rect = r; break search; }
+      }
+    }
+  }
+  ctx.lineWidth = 1.5; ctx.setLineDash([]);
+  for (const l of labels) {
+    if (!l.rect) continue;
+    const cx = Math.max(l.rect.x, Math.min(l.q[0], l.rect.x + l.rect.w)), cy = Math.max(l.rect.y, Math.min(l.q[1], l.rect.y + l.rect.h));
+    if (Math.hypot(cx - l.q[0], cy - l.q[1]) < 3) continue;
+    ctx.strokeStyle = l.color + 'aa'; ctx.beginPath(); ctx.moveTo(l.q[0], l.q[1]); ctx.lineTo(cx, cy); ctx.stroke();
+    ctx.fillStyle = l.color; ctx.beginPath(); ctx.arc(l.q[0], l.q[1], 2.5, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.lineWidth = 4;
+  for (const l of labels) {
+    if (!l.rect) continue;
+    const x = l.rect.x + l.rect.w / 2, y = l.rect.y + l.rect.h / 2;
+    ctx.strokeStyle = '#0b0e12cc'; ctx.strokeText(l.s, x, y);
+    ctx.fillStyle = l.color; ctx.fillText(l.s, x, y);
+  }
+  ctx.textBaseline = 'alphabetic';
 }
 const label = (category, id) => `${NAMES[category] || category}${id ? ' ' + id.replace('w:', '') : ''}`;
 
@@ -324,6 +362,7 @@ function drawWorldOverlay() {
     if (g.role === 'environment') continue;
     p.text([g.center[0], g.center[1], g.center[2] + g.size[2] / 2 + 0.1], label(g.category, g.id), '#cfe6ff');
   }
+  p.flush();
 }
 function drawEgoOverlay() {
   const cv = $('ovEgo'), ctx = cv.getContext('2d');
@@ -356,6 +395,7 @@ function drawEgoOverlay() {
     }
     ctx.setLineDash([]);
   }
+  p.flush();
 }
 function drawOverlays() { drawWorldOverlay(); drawEgoOverlay(); }
 
@@ -521,10 +561,15 @@ function drawMetrics() {
   ctx.strokeStyle = '#2a313a'; ctx.beginPath(); ctx.moveTo(40, y(0)); ctx.lineTo(cv.width - 40, y(0)); ctx.stroke();
   ctx.fillStyle = '#8b96a3'; ctx.fillText(`${maxE.toFixed(1)} cm`, 2, y(maxE / 100) + 4); ctx.fillText('0', 26, y(0) + 4);
   ctx.textAlign = 'right'; ctx.fillText('100%', cv.width - 2, yr(1) + 4); ctx.textAlign = 'left';
+  const labelRows = [[], [], []];  // phase-switch labels: the first row where the label overlaps none
   for (let i = 1; i < hist.length; i++) {
     if (hist[i][4] !== hist[i - 1][4]) {
       ctx.strokeStyle = '#ffffff55'; ctx.setLineDash([3, 3]); ctx.beginPath(); ctx.moveTo(x(hist[i][0]), 20); ctx.lineTo(x(hist[i][0]), cv.height - 18); ctx.stroke(); ctx.setLineDash([]);
-      ctx.fillStyle = '#c3ccd6'; ctx.fillText(hist[i][4] || '', x(hist[i][0]) + 3, 30);
+      const text = hist[i][4] || '', x0 = x(hist[i][0]) + 3, x1 = x0 + ctx.measureText(text).width + 4;
+      const row = labelRows.findIndex(spans => spans.every(([a, b]) => x1 <= a || b <= x0));
+      if (row < 0) continue;
+      labelRows[row].push([x0, x1]);
+      ctx.fillStyle = '#c3ccd6'; ctx.fillText(text, x0, 30 + row * 14);
     }
   }
   const line = (k, color, scale) => {
