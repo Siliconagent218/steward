@@ -1299,11 +1299,12 @@ steward（fork 仓库根目录）
 | Ego Harness bundle | `ctx.ego` 服务定义与 HTTP 提供者；机器人工具 `ego_state`、`ego_query`、`ego_observe`、`ego_explore`、`ego_predict`、`skill_run`、`skill_status`、`body_stop`；安全守卫（`tools/pre-execute` 收据核验、`ctx.tools.guard` 最终否决、`/estop` 急停）；禁用继承自 `dsh-base` 的 shell、文件、网页、工作流、后台任务与工作目录工具，机器人只能经 `ctx.ego` 感知与行动 |
 | World Harness bundle | `ctx.world` 服务定义与 HTTP 提供者；工具 `world_status`、`world_scene`、`asset_search`、`asset_get`、`asset_create`、`asset_preview`、`asset_publish`、`scene_compose`、`scene_render`、`scenario_save`、`world_catalog`、`episode_control`、`world_clock`、`world_edit`、`observer_report` |
 | 运行中世界编辑 | WCA `POST /wca/edit`，不停止 Episode：`move` 移动物体或家具（`at` 地面位置或 `on` 支撑实体加偏移；移动家具时其上的物体随之移动），`spawn` 从已发布资产新增实体，`remove` 删除实体（其上物体自然掉落）。新增与删除在主线程重新编译 MuJoCo 模型，按名称迁移关节状态、执行器目标、仿真时间与机器人抓取。编辑后若与其他实体穿透超过 1 厘米则撤销并拒绝；机器人、建筑与机器人手中的物体不可编辑。每次编辑记为 `world/edit` 事件（`plausibility: god-mode`）；机器人不会收到通知，只能靠自身感知发现变化 |
-| 控制台对话 | 控制台右侧（窄屏时在主视图下方）的「世界编辑对话」：每条消息由主机以 `dsh --profile world-task --json` 交给 WH 处理，首条消息开启 DSH Session，之后用 `--session-id` 接续同一会话；`--patch` 叠加层把 `steward-world-api` 指向本主机的 WCA。主机读取 NDJSON 运行事件，控制台实时显示 WH 的回复与每次工具调用（可展开查看参数与结果）。主机为 WH 附加操作说明：先 `world_scene` 再 `world_edit`，不启停 Episode、不使用 shell 或文件工具。`steward up` / `steward world` 默认使用 `var/dsh/world`，`--world-harness ''` 关闭对话 |
+| 控制台对话 | 控制台右侧（窄屏时在主视图下方）的「操作员对话」，可切换发给「世界 · World Harness」或「机器人 · robot-1」（EH）。每条消息由主机以 `dsh --profile world-task --json`（WH，`var/dsh/world`）或 `dsh --profile ego --json`（EH，`var/dsh/robot-1`，工作目录为机器人自己的空 `workspace`）处理；每个 harness 各自的首条消息开启 DSH Session，之后用 `--session-id` 接续。`--patch` 叠加层把 `steward-world-api` 指向本主机的 WCA，或把 `steward-ego-runtime` 指向机器人的 Ego API 并设置 `owner: operator`。主机读取 NDJSON 运行事件，控制台实时显示回复与每次工具调用（可展开查看参数与结果），按来源着色。主机为 WH 附加操作说明（先 `world_scene` 再 `world_edit`，不启停 Episode、不使用 shell 或文件工具），为 EH 附加任务做法（先 `ego_state`，每个动作先 `ego_predict` 再 `skill_run`，执行后自查），EH 仍只有机器人工具，看不到 World State。`--world-harness ''` / `--robot-harness ''` 分别关闭；`steward world` 用 `--ego-api` 指定机器人的 Ego API |
+| 机器人独占控制 | Ego API `GET/POST /ego/control`：客户端可获取独占控制（同时停止正在执行的技能），持有期间只有带相同 `owner` 的 `skill/run` 与 `ego/explore` 请求能启动技能，其他客户端收到 409；任何客户端都可以停止机器人。控制台的机器人对话在每轮开始时以 `operator` 身份获取控制、结束时交还；`steward shuttle` 每步开始前检查控制权，被接管时暂停并显示「机器人由 operator 接管」，交还后先环顾刷新 ES 再继续 |
 | Steward 控制台 | 浏览器页面 `http://127.0.0.1:7400/console`（由 WCA 端口提供，属于 Steward 平面）。主视图是共用同一斜上方相机的两个面板：左为 World State（WSim 的 MuJoCo 自由相机渲染），右为机器人的 Ego State（ES 经与 ESim 相同的 SceneState → MJCF 转换器渲染：只有已感知的物体，按类别着色，存在概率低时变淡，机器人位于自身估计位姿），并叠加 2σ 不确定度圈、标签与到真实位置的误差线。两个面板同步拖动旋转、滚轮缩放，预设斜上方南 / 东南 / 西南与正上方视角；靠近相机一侧的墙体自动剖切（只影响渲染）。下方为机器人头部相机（按固定时间表以每秒 15 帧取帧，标题显示实测帧率；页面在后台时暂停取帧）、俯视地图、Observer 指标与误差曲线、抓放事件；顶栏可暂停 / 继续 / 倍速 / 重置 / 切换 Scenario |
 | 主线程渲染 | macOS 上 OpenGL 必须在主线程运行：相机渲染、资产预览、Ego State 渲染、Episode 加载与重置都由请求线程排队、主线程执行；没有主线程服务时请求超时而不阻塞物理。关闭渲染器前先切换到它自己的 OpenGL 上下文（`mujoco.Renderer.close` 不会这样做，会误删其他渲染器的 GPU 资源） |
 | Episode 切换 | ER 检测到世界时钟倒退即视为重新开机，清空 ES、收据并取消正在执行的技能 |
-| 检查与工具 | pytest 39 项；DSH 单元测试与跨语言集成测试 6 项；三个 profile 的组合配置快照比对；多随机种子回归脚本；命令行 `steward build-kitchen / world / ego / up / demo`；运行脚本 `run-ego.sh`、`run-world.sh` |
+| 检查与工具 | pytest 43 项；DSH 单元测试与跨语言集成测试 6 项；三个 profile 的组合配置快照比对；多随机种子回归脚本；命令行 `steward build-kitchen / world / ego / up / demo`；运行脚本 `run-ego.sh`、`run-world.sh` |
 
 ### 13.3 实际布局
 
@@ -1419,6 +1420,7 @@ EH profile 默认从上游 `headless` 模板派生（设置 `ROBOT_TEMPLATE=web`
 | 循环搬运 | `steward shuttle --steps 12`：四整轮共 12 次搬运全部由 World State 逐步确认；pytest 覆盖前三步的轮转顺序与「任何时刻两件物品不在同一家具上」 |
 | 运行中世界编辑 | pytest 覆盖：移动到其他支撑面、移动餐桌时盘子随之移动、穿透与受保护实体被拒且世界不变、新增与删除后仿真时间 / 机器人位姿 / 执行器目标不变、WCA 接受省略 `w:` 前缀的 id；DSH 单元测试覆盖 `world_edit` 参数到 WCA 请求的映射 |
 | 控制台对话（模型驱动） | 循环搬运进行中，在控制台输入「在餐桌上再放一个盘子」：WH 依次调用 `world_scene`、`asset_search`、`world_edit spawn`、`world_scene` 核对，约 11 秒完成；接着输入「把盘子 plate-1 从操作台挪到餐桌上，放在新盘子旁边」，WH 沿用同一 Session 直接 `world_edit move`，机器人任务未中断 |
+| 控制台对话：机器人任务（模型驱动） | 循环搬运进行中，切换到「机器人」并输入「把操作台上的盘子拿到餐桌上」：主机接管机器人，循环搬运正在执行的抓取被停止并暂停；EH 依次 `ego_state` → `ego_predict navigate` → `skill_run` → `ego_predict pick`（风险 0）→ 抓取 → 导航到餐桌 → `ego_predict place` → 放置 → `ego_state` 自查并汇报；World State 确认 `w:plate-1` 位于 `w:table-1`。交还控制后循环搬运自动继续并经 World State 确认。pytest 覆盖控制的获取 / 拒绝 / 交还、机器人对话每轮获取与交还控制、EH 在空工作目录运行且操作说明不含 World State、循环搬运在被接管时暂停 |
 | 能力边界 | EH 的组合配置中 `tool-bash`、`tool-pwsh`、`tool-jobs`、`tool-fs`、`tool-fs-search`、`tool-web`、`tool-workflow`、`tool-working-directory` 均为禁用，变化纳入快照比对 |
 
 ### 13.6 与设计的偏差

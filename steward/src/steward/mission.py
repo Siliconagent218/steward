@@ -104,7 +104,7 @@ def cup_to_table(api: str, timeout_s: float = 180.0) -> dict:
 
 def shuttle(api: str, steps: int, supports: tuple[str, ...] = ("table", "cabinet", "sideboard"),
             objects: tuple[str, ...] = ("cup", "bowl"), on_step=None, timeout_s: float = 180.0,
-            on_failure=None) -> dict:
+            on_failure=None, on_wait=None) -> dict:
     """Carry objects around the cycle of support categories, one move per step; ``steps <= 0``
     repeats until the caller stops the process.
 
@@ -115,13 +115,15 @@ def shuttle(api: str, steps: int, supports: tuple[str, ...] = ("table", "cabinet
     ``on_step(index, record)`` is called after each completed move. A bounded run stops at the
     first failed step; an endless run reports it through ``on_failure(index, message)``, puts
     down anything still held, looks around again and continues, so the world may be edited
-    while it runs.
+    while it runs. Before each step the shuttle waits while another client (an operator task)
+    holds exclusive control of the robot, reporting ``on_wait(owner)`` once per pause.
     """
     if len(objects) >= len(supports):
         raise ValueError("the shuttle needs more supports than objects")
     log = [{"step": "explore", "state": _explore(api, timeout_s)["state"]}]
     moves = []
     for index in (range(steps) if steps > 0 else itertools.count()):
+        _wait_for_control(api, on_wait)
         if steps > 0:
             moves.append(_shuttle_step(api, index, supports, objects, log, timeout_s))
         else:
@@ -131,11 +133,22 @@ def shuttle(api: str, steps: int, supports: tuple[str, ...] = ("table", "cabinet
                 log.append({"step": index + 1, "failed": str(exc)})
                 if on_failure is not None:
                     on_failure(index, str(exc))
+                _wait_for_control(api, on_wait)
                 _recover(api, supports, objects, log, timeout_s)
                 continue
         if on_step is not None:
             on_step(index, moves[-1])
     return {"log": log, "moves": moves, "summary": call("GET", f"{api}/ego/summary")}
+
+
+def _wait_for_control(api: str, on_wait=None, poll_s: float = 1.0) -> None:
+    owner = call("GET", f"{api}/ego/control")["owner"]
+    if owner is None:
+        return
+    if on_wait is not None:
+        on_wait(owner)
+    while call("GET", f"{api}/ego/control")["owner"] is not None:
+        time.sleep(poll_s)
 
 
 def _recover(api: str, supports: tuple[str, ...], objects: tuple[str, ...], log: list, timeout_s: float) -> None:

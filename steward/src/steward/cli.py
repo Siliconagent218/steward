@@ -59,14 +59,16 @@ def _host(args, run_dir: Path):
 
 
 def _chat_config(args):
-    """World Harness chat for the console: the steward-local DSH launcher and world home."""
+    """Operator chat for the console: the steward-local DSH launcher, the World Harness home and
+    the robot's Ego Harness home. ``steward up`` fills in its own Ego API address after start."""
     from steward.world.chat import ChatConfig
 
-    if not getattr(args, "world_harness", None):
+    world, robot = getattr(args, "world_harness", None), getattr(args, "robot_harness", None)
+    if not world and not robot:
         return None
-    home = Path(args.world_harness)
-    return ChatConfig(dsh=STEWARD_DIR / "dsh" / "node_modules" / ".bin" / "dsh", dsh_home=home,
-                      cwd=STEWARD_DIR, env_file=STEWARD_DIR / ".env")
+    return ChatConfig(dsh=STEWARD_DIR / "dsh" / "node_modules" / ".bin" / "dsh", cwd=STEWARD_DIR,
+                      env_file=STEWARD_DIR / ".env", world_home=Path(world) if world else None,
+                      robot_home=Path(robot) if robot else None, ego_api=getattr(args, "ego_api", None))
 
 
 def cmd_world(args) -> int:
@@ -100,6 +102,8 @@ def cmd_up(args) -> int:
     host = _host(args, run_dir)
     robot_url = host.robot_servers["w:robot-1"].url
     runtime, api = _start_ego(robot_url, args.api_port, run_dir / "ego")
+    if host.chat.config is not None:
+        host.chat.config.ego_api = api.url
     print(json.dumps({"console": f"{host.wca.url}/console", "wca": host.wca.url, "robot": robot_url, "egoApi": api.url, "runDir": str(run_dir),
                       "task": host.scenario["task"]}, ensure_ascii=False), flush=True)
     _wait_forever([api.stop, runtime.stop, host.stop], host.pump)
@@ -215,12 +219,15 @@ def cmd_shuttle(args) -> int:
     def on_failure(index: int, message: str) -> None:
         print(f"[第 {index + 1} 步失败，重新观察后继续]  {message}  ({time.monotonic() - t0:.0f}s)", flush=True)
 
+    def on_wait(owner: str) -> None:
+        print(f"[暂停：机器人由 {owner} 接管，交还控制后继续]  ({time.monotonic() - t0:.0f}s)", flush=True)
+
     outcome: dict = {}
 
     def mission() -> None:
         try:
             outcome["result"] = shuttle(api_url, args.steps, tuple(supports), tuple(objects), on_step=on_step,
-                                        on_failure=on_failure)
+                                        on_failure=on_failure, on_wait=on_wait)
         except MissionFailed as exc:
             outcome["error"] = str(exc)
 
@@ -263,7 +270,12 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--robot-port", type=int, default=0 if in_process else 7410)
         if not in_process:
             p.add_argument("--world-harness", default=str(STEWARD_DIR / "var" / "dsh" / "world"),
-                           help="DSH home of the World Harness used by the console chat; '' disables the chat")
+                           help="DSH home of the World Harness used by the console chat; '' disables it")
+            p.add_argument("--robot-harness", default=str(STEWARD_DIR / "var" / "dsh" / "robot-1"),
+                           help="DSH home of the robot's Ego Harness used by the console chat; '' disables it")
+        if name == "world":
+            p.add_argument("--ego-api", default="http://127.0.0.1:7420",
+                           help="Ego API of the robot, for robot tasks from the console chat")
         if name == "up":
             p.add_argument("--api-port", type=int, default=7420)
         if name == "shuttle":

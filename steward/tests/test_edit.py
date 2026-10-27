@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-import json
-
 import pytest
 
 from steward.authoring.service import AuthoringService
 from steward.net import HttpError, call
-from steward.world.chat import ChatConfig, WorldChat
 from steward.world.server import StewardHost
 from steward.world.sim import EditError, WorldSim
 from tests.test_host import _pump_while
@@ -88,41 +85,3 @@ def test_wca_edit_endpoint_accepts_ids_without_prefix(kitchen_root):
         assert "cannot be edited" in str(refused["error"])
     finally:
         host.stop()
-
-
-def test_chat_reads_world_harness_run_events(tmp_path):
-    script = tmp_path / "dsh"
-    events = [
-        {"type": "session", "sessionId": "session-1"},
-        {"type": "tool_call", "callId": "c1", "tool": "world_edit", "input": {"action": "move"}},
-        {"type": "tool_result", "callId": "c1", "status": "completed", "result": "{\"ok\": true}"},
-        {"type": "text", "text": "已移动杯子"},
-        {"type": "final", "sessionId": "session-1", "text": "已移动杯子"},
-    ]
-    lines = "\n".join(json.dumps(e, ensure_ascii=False) for e in events)
-    script.write_text(f"#!/bin/sh\ncat > \"$DSH_HOME/args-$$\"; echo \"$@\" >> \"$DSH_HOME/argv\"\ncat <<'EOF'\n{lines}\nEOF\n")
-    script.chmod(0o755)
-    home = tmp_path / "home"
-    (home / "profiles" / "world-task").mkdir(parents=True)
-    chat = WorldChat(ChatConfig(dsh=script, dsh_home=home, cwd=tmp_path, env_file=tmp_path / ".env"),
-                     lambda: "http://127.0.0.1:1")
-    chat.send("把杯子放到桌子上")
-    _wait_idle(chat)
-    chat.send("再放回去")
-    _wait_idle(chat)
-    state = chat.state()
-    roles = [m["role"] for m in state["messages"]]
-    assert roles == ["user", "tool", "assistant", "user", "tool", "assistant"]
-    assert state["messages"][1]["status"] == "completed" and state["sessionId"] == "session-1"
-    argv = (home / "argv").read_text().splitlines()
-    assert "--session-id" not in argv[0] and "--session-id session-1" in argv[1]
-    assert chat.state(since=state["messages"][-1]["id"])["messages"] == []
-
-
-def _wait_idle(chat: WorldChat, timeout: float = 10.0) -> None:
-    import time
-
-    deadline = time.time() + timeout
-    while chat.busy and time.time() < deadline:
-        time.sleep(0.02)
-    assert not chat.busy

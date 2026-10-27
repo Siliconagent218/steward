@@ -61,6 +61,7 @@ class EgoRuntime:
         self._thread: threading.Thread | None = None
         self.receipts: dict[str, dict] = {}
         self.last_error: str | None = None
+        self.control_owner: str | None = None
         self.executor = SkillExecutor(self.link.command, self._motion_state, self._mark_held, self.config.motion)
 
     # --------------------------------------------------------------- lifecycle
@@ -197,8 +198,35 @@ class EgoRuntime:
             raise KeyError(f"unknown receipt {receipt_id!r}")
         return self.receipts[receipt_id]
 
-    def run(self, receipt_id: str) -> dict:
+    # ----------------------------------------------------------------- control
+    def control(self) -> dict:
+        return {"owner": self.control_owner}
+
+    def acquire_control(self, owner: str) -> dict:
+        """Give ``owner`` exclusive use of skills until it releases control; the running skill stops.
+        Clients that are not the owner cannot start skills meanwhile, but anyone may still stop."""
+        if not owner:
+            raise ValueError("control needs an owner name")
+        with self._lock:
+            if self.control_owner not in (None, owner):
+                raise PermissionError(f"the robot is already controlled by {self.control_owner}")
+            self.control_owner = owner
+        self.executor.stop()
+        return self.control()
+
+    def release_control(self, owner: str) -> dict:
+        with self._lock:
+            if self.control_owner == owner:
+                self.control_owner = None
+        return self.control()
+
+    def _check_control(self, owner: str | None) -> None:
+        if self.control_owner is not None and owner != self.control_owner:
+            raise PermissionError(f"the robot is controlled by {self.control_owner}; wait until it releases control")
+
+    def run(self, receipt_id: str, owner: str | None = None) -> dict:
         """Execute a predicted plan. The runtime re-checks the receipt here, where the motion happens."""
+        self._check_control(owner)
         receipt = self.receipt(receipt_id)
         now = self.estimator.stamp
         if receipt.get("used"):
@@ -212,8 +240,9 @@ class EgoRuntime:
         receipt["used"] = True
         return self.executor.start(receipt["skill"], receipt).to_dict()
 
-    def explore(self) -> dict:
+    def explore(self, owner: str | None = None) -> dict:
         """Look around in place. Rotation without translation needs no receipt."""
+        self._check_control(owner)
         return self.executor.start("look_around", {"id": "look-around", "plan": {}}).to_dict()
 
     def job(self, job_id: str) -> dict:

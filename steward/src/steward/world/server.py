@@ -23,7 +23,7 @@ from steward.net import Binary, HttpError, JsonServer
 from steward.observer.observer import Observer
 from steward.world.console import CONSOLE_HTML, console_state
 from steward.world.ego_view import EgoViewRenderer
-from steward.world.chat import ChatConfig, WorldChat
+from steward.world.chat import ChatConfig, HarnessChat
 from steward.world.sim import EditError, WorldSim
 
 
@@ -40,7 +40,7 @@ class StewardHost:
                  run_dir: Path | None = None, wca_port: int = 0, robot_ports: dict[str, int] | None = None,
                  chat: ChatConfig | None = None):
         self.authoring = AuthoringService(root)
-        self.chat = WorldChat(chat, lambda: self.wca.url)
+        self.chat = HarnessChat(chat, lambda: self.wca.url)
         self.speed = speed
         self.seed = seed
         self.run_dir = run_dir
@@ -230,8 +230,8 @@ class StewardHost:
             ("POST", "/scenarios/save"): guard(lambda q, b: a.save_scenario(b)),
             ("POST", "/wca/edit"): guard(lambda q, b: self.edit(b)),
             ("GET", "/console/chat"): guard(lambda q, b: self.chat.state(int(q.get("since", 0)))),
-            ("POST", "/console/chat"): guard(lambda q, b: self.chat.send(b.get("message", ""))),
-            ("POST", "/console/chat/reset"): guard(lambda q, b: self.chat.reset()),
+            ("POST", "/console/chat"): guard(lambda q, b: self.chat.send(b.get("agent", "world"), b.get("message", ""))),
+            ("POST", "/console/chat/reset"): guard(lambda q, b: self.chat.reset(b.get("agent", "world"))),
         }
 
     # -------------------------------------------------------------- edits

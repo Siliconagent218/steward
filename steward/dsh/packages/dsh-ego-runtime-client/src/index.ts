@@ -15,6 +15,11 @@ export interface Config {
   endpoint: string
   /** Deadline for ordinary requests in milliseconds. */
   timeoutMs: number
+  /**
+   * Control owner sent with skill and explore requests. While a client holds exclusive control of
+   * the robot, the Ego Runtime only starts skills for requests naming that owner.
+   */
+  owner?: string
 }
 
 /** `ctx.ego` provider backed by HTTP calls to the Ego API. */
@@ -22,6 +27,7 @@ export class EgoRuntimeClient extends EgoService {
   static Config = z.object({
     endpoint: z.string().default('http://127.0.0.1:7420'),
     timeoutMs: z.number().min(100).default(15_000),
+    owner: z.string(),
   })
 
   private readonly base: string
@@ -59,7 +65,7 @@ export class EgoRuntimeClient extends EgoService {
   }
 
   explore(signal?: AbortSignal): Promise<SkillJob> {
-    return this.call('POST', '/ego/explore', {}, signal)
+    return this.call('POST', '/ego/explore', { owner: this.config.owner }, signal)
   }
 
   predict(skill: EgoSkill, params: JsonObject, signal?: AbortSignal): Promise<PredictionReceipt> {
@@ -71,7 +77,7 @@ export class EgoRuntimeClient extends EgoService {
   }
 
   run(receiptId: string, signal?: AbortSignal): Promise<SkillJob> {
-    return this.call('POST', '/skill/run', { receipt: receiptId }, signal)
+    return this.call('POST', '/skill/run', { receipt: receiptId, owner: this.config.owner }, signal)
   }
 
   job(jobId: string, signal?: AbortSignal): Promise<SkillJob> {

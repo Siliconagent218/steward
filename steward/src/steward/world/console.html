@@ -55,7 +55,16 @@
                 padding: 4px 2px 8px; }
   .msg { max-width: 92%; padding: 7px 10px; border-radius: 10px; white-space: pre-wrap; word-break: break-word; }
   .msg.user { align-self: flex-end; background: #1f3a5c; }
-  .msg.assistant { align-self: flex-start; background: #232a33; }
+  .msg.user.robot { background: #4a3218; }
+  .msg.assistant { align-self: flex-start; background: #232a33; border-left: 3px solid var(--gt); }
+  .msg.assistant.robot { border-left-color: var(--ego); }
+  .msg .who { display: block; font-size: 11px; color: var(--muted); margin-bottom: 2px; }
+  .tool.world summary::before { content: '● '; color: var(--gt); }
+  .tool.robot summary::before { content: '● '; color: var(--ego); }
+  .targets { display: flex; gap: 6px; margin-bottom: 6px; }
+  .targets button { flex: 1; font-size: 12px; }
+  .targets button.on.world { border-color: var(--gt); color: #cfe6ff; }
+  .targets button.on.robot { border-color: var(--ego); color: #ffd2a6; }
   .msg.error { align-self: stretch; background: #3a1f24; color: #ffb3b3; font-size: 12px; }
   .msg.system { align-self: center; color: var(--muted); font-size: 12px; padding: 2px; }
   .tool { align-self: flex-start; font-size: 12px; color: var(--muted); max-width: 100%; }
@@ -130,15 +139,16 @@
     </div>
   </section>
   <section class="card chat">
-    <h2>世界编辑对话 <span class="pill" id="chatStatus">World Harness</span>
-      <span class="spacer"></span><button id="chatReset" title="开始新的 World Harness 会话">新会话</button></h2>
-    <div class="msgs" id="chatMsgs"></div>
-    <div class="chips" id="chatChips">
-      <button>把杯子挪到餐边柜上</button><button>在餐桌上再放一个碗</button>
-      <button>把盘子拿走</button><button>把餐桌往东挪 30 厘米</button>
+    <h2>操作员对话 <span class="pill" id="chatStatus"></span>
+      <span class="spacer"></span><button id="chatReset">新会话</button></h2>
+    <div class="targets">
+      <button data-target="world" class="on world">世界 · World Harness</button>
+      <button data-target="robot" class="robot">机器人 · robot-1</button>
     </div>
+    <div class="msgs" id="chatMsgs"></div>
+    <div class="chips" id="chatChips"></div>
     <div class="composer">
-      <textarea id="chatInput" placeholder="描述要对世界做的修改，Enter 发送，Shift+Enter 换行"></textarea>
+      <textarea id="chatInput"></textarea>
       <button id="chatSend">发送</button>
     </div>
   </section>
@@ -409,14 +419,26 @@ function drawEvents() {
 
 // --------------------------------------------------------------------- chat
 const TOOL_NAMES = { world_edit: '修改世界', world_scene: '读取世界状态', world_status: '读取运行状态',
-  asset_search: '查找资产', asset_get: '读取资产', world_clock: '仿真时钟' };
+  asset_search: '查找资产', asset_get: '读取资产', world_clock: '仿真时钟',
+  ego_state: '查看自我态', ego_query: '查询物体', ego_observe: '观察', ego_explore: '环顾',
+  ego_predict: '预测（ESim）', skill_run: '执行技能', skill_status: '技能状态', body_stop: '停止' };
+const TARGETS = {
+  world: { name: '世界', placeholder: '描述要对世界做的修改（World Harness 执行），Enter 发送，Shift+Enter 换行',
+    chips: ['把杯子挪到餐边柜上', '在餐桌上再放一个碗', '把盘子拿走', '把餐桌往东挪 30 厘米'],
+    empty: '描述要修改的物体或位置；World Harness 会读取世界状态并调用 world_edit 执行，机器人需要自己发现变化。' },
+  robot: { name: '机器人', placeholder: '给 robot-1 下达新任务（Ego Harness 执行），Enter 发送，Shift+Enter 换行',
+    chips: ['看看周围有什么', '把杯子放到餐桌上', '把碗拿到操作台上', '停下来，原地待命'],
+    empty: '给机器人下达新任务；本轮对话期间机器人由操作员接管，后台循环搬运暂停，结束后自动继续。机器人只能依靠自己的感知（Ego State）。' },
+};
 const esc = (s) => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-let chatSig = '', chatBusy = false;
+let chatSig = '', chatState = null, chatTarget = 'world';
 function toolSummary(m) {
   const input = m.input && typeof m.input === 'object' ? m.input : {};
-  const brief = m.tool === 'world_edit'
-    ? [input.action, input.entity, input.asset, input.on ? `→ ${input.on}` : '', input.x != null ? `(${input.x}, ${input.y})` : ''].filter(Boolean).join(' ')
-    : '';
+  let brief = '';
+  if (m.tool === 'world_edit') brief = [input.action, input.entity, input.asset, input.on ? `→ ${input.on}` : '',
+    input.x != null ? `(${input.x}, ${input.y})` : ''].filter(Boolean).join(' ');
+  else if (m.tool === 'ego_predict') brief = [input.skill, input.target, input.on ? `→ ${input.on}` : '',
+    input.x != null ? `(${input.x}, ${input.y})` : ''].filter(Boolean).join(' ');
   const mark = m.status === 'completed' ? '<span class="ok">✓</span>' : m.status === 'error' ? '<span class="bad">✗</span>' : '<span class="run">…</span>';
   return `${mark} ${esc(TOOL_NAMES[m.tool] || m.tool)}${brief ? '　' + esc(brief) : ''}`;
 }
@@ -424,33 +446,53 @@ function renderChat(chat) {
   const box = $('chatMsgs');
   const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
   const open = new Set([...box.querySelectorAll('details[open]')].map(d => d.dataset.id));
-  box.innerHTML = chat.messages.map(m => m.role === 'tool'
-    ? `<details class="tool" data-id="${m.id}"${open.has(String(m.id)) ? ' open' : ''}><summary>${toolSummary(m)}</summary>`
-      + `<pre>${esc(JSON.stringify(m.input, null, 1))}</pre>${m.text ? `<pre>${esc(m.text)}</pre>` : ''}</details>`
-    : `<div class="msg ${m.role}">${esc(m.text)}</div>`).join('')
-    || '<div class="msg system">在下方描述要修改的物体或位置；World Harness（DSH）会读取世界状态并调用 world_edit 执行，机器人需要自己发现变化。</div>';
-  if (chat.busy) box.insertAdjacentHTML('beforeend', '<div class="msg system">World Harness 正在处理…</div>');
+  const label = (m) => (chat.agents[m.agent] || {}).label || m.agent;
+  box.innerHTML = chat.messages.map(m => {
+    if (m.role === 'tool') return `<details class="tool ${m.agent}" data-id="${m.id}"${open.has(String(m.id)) ? ' open' : ''}>`
+      + `<summary>${toolSummary(m)}</summary><pre>${esc(JSON.stringify(m.input, null, 1))}</pre>${m.text ? `<pre>${esc(m.text)}</pre>` : ''}</details>`;
+    const who = m.role === 'user' ? `→ ${TARGETS[m.agent] ? TARGETS[m.agent].name : m.agent}` : m.role === 'assistant' ? label(m) : '';
+    return `<div class="msg ${m.role} ${m.agent}">${who ? `<span class="who">${esc(who)}</span>` : ''}${esc(m.text)}</div>`;
+  }).join('') || `<div class="msg system">${esc(TARGETS[chatTarget].empty)}</div>`;
+  for (const [key, a] of Object.entries(chat.agents)) {
+    if (a.busy) box.insertAdjacentHTML('beforeend', `<div class="msg system">${esc(a.label)} 正在处理…</div>`);
+  }
   if (nearBottom) box.scrollTop = box.scrollHeight;
+}
+function renderTarget() {
+  const t = TARGETS[chatTarget];
+  document.querySelectorAll('[data-target]').forEach(b => b.classList.toggle('on', b.dataset.target === chatTarget));
+  $('chatInput').placeholder = t.placeholder;
+  $('chatChips').innerHTML = t.chips.map(c => `<button>${esc(c)}</button>`).join('');
+  $('chatChips').querySelectorAll('button').forEach(b => b.onclick = () => { $('chatInput').value = b.textContent; $('chatInput').focus(); });
+  renderStatus();
+}
+function renderStatus() {
+  const a = chatState && chatState.agents[chatTarget];
+  if (!a) { $('chatStatus').textContent = ''; return; }
+  const robot = chatState.agents.robot;
+  const control = robot && robot.control ? `　机器人由 ${robot.control} 接管` : '';
+  $('chatStatus').textContent = (!a.available ? '不可用' : a.busy ? '处理中' : a.sessionId ? '会话进行中' : '新会话') + control;
+  $('chatStatus').title = a.reason || a.sessionId || '';
+  $('chatSend').disabled = a.busy || !a.available;
+  $('chatReset').title = `开始新的 ${a.label} 会话`;
 }
 async function refreshChat() {
   try {
-    const chat = await api('GET', '/console/chat');
-    chatBusy = chat.busy;
-    $('chatSend').disabled = chat.busy || !chat.available;
-    $('chatStatus').textContent = !chat.available ? '不可用' : chat.busy ? '处理中' : chat.sessionId ? '会话进行中' : 'World Harness';
-    $('chatStatus').title = chat.reason || chat.sessionId || '';
-    const sig = JSON.stringify([chat.busy, chat.messages]);
-    if (sig !== chatSig) { chatSig = sig; renderChat(chat); }
-    if (!chat.available && !chat.messages.length) $('chatMsgs').innerHTML = `<div class="msg error">${esc(chat.reason)}</div>`;
+    chatState = await api('GET', '/console/chat');
+    renderStatus();
+    const sig = JSON.stringify([chatTarget, Object.values(chatState.agents).map(a => a.busy), chatState.messages]);
+    if (sig !== chatSig) { chatSig = sig; renderChat(chatState); }
+    const a = chatState.agents[chatTarget];
+    if (a && !a.available && !chatState.messages.length) $('chatMsgs').innerHTML = `<div class="msg error">${esc(a.reason)}</div>`;
   } catch (e) { showError(e); }
 }
-async function sendChat(text) {
-  text = (text ?? $('chatInput').value).trim();
-  if (!text || chatBusy) return;
+async function sendChat() {
+  const text = $('chatInput').value.trim();
+  const a = chatState && chatState.agents[chatTarget];
+  if (!text || (a && a.busy)) return;
   try {
-    await api('POST', '/console/chat', { message: text });
+    await api('POST', '/console/chat', { agent: chatTarget, message: text });
     $('chatInput').value = '';
-    chatBusy = true;
     refreshChat();
   } catch (e) { showError(e); }
 }
@@ -458,8 +500,9 @@ $('chatSend').onclick = () => sendChat();
 $('chatInput').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendChat(); }
 });
-$('chatChips').querySelectorAll('button').forEach(b => b.onclick = () => { $('chatInput').value = b.textContent; $('chatInput').focus(); });
-$('chatReset').onclick = async () => { try { await api('POST', '/console/chat/reset'); refreshChat(); } catch (e) { showError(e); } };
+document.querySelectorAll('[data-target]').forEach(b => b.onclick = () => { chatTarget = b.dataset.target; chatSig = ''; renderTarget(); refreshChat(); });
+$('chatReset').onclick = async () => { try { await api('POST', '/console/chat/reset', { agent: chatTarget }); refreshChat(); } catch (e) { showError(e); } };
+renderTarget();
 
 const CAMERA_FPS = 15;
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
