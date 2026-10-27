@@ -364,7 +364,7 @@ function setView(v) { view = v; requestRenders(); }
 for (const id of ['vpWorld', 'vpEgo']) {
   const vp = $(id);
   let drag = null;
-  vp.addEventListener('pointerdown', (e) => { if (!view) return; drag = { x: e.clientX, y: e.clientY, az: view.azimuth, el: view.elevation };
+  vp.addEventListener('pointerdown', (e) => { if (!view || e.target.closest('.alert-box')) return; drag = { x: e.clientX, y: e.clientY, az: view.azimuth, el: view.elevation };
     vp.setPointerCapture(e.pointerId); vp.classList.add('dragging'); });
   vp.addEventListener('pointermove', (e) => {
     if (!drag) return;
@@ -539,9 +539,13 @@ function renderStatus() {
   $('chatStop').disabled = !a.busy;
   $('chatReset').title = `开始新的 ${a.label} 会话`;
 }
+let shownAlerts = [];
 const ALERT_SOURCES = { agent: '机器人智能体报告', skill: '技能执行异常', runtime: '感知异常', api: 'Ego API 异常',
   harness: 'Ego Harness 运行失败' };
+const dismissedAlerts = new Set();
 function renderAlerts(alerts) {
+  alerts = alerts.filter(a => !dismissedAlerts.has(a.id));
+  shownAlerts = alerts;
   const box = $('egoAlert');
   $('vpEgo').classList.toggle('alerting', alerts.length > 0);
   if (!alerts.length) { box.hidden = true; return; }
@@ -577,7 +581,11 @@ $('chatInput').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendChat(); }
 });
 document.querySelectorAll('[data-target]').forEach(b => b.onclick = () => { chatTarget = b.dataset.target; chatSig = ''; renderTarget(); refreshChat(); });
-$('egoAlertAck').onclick = async () => { try { await api('POST', '/console/alerts/ack'); refreshChat(); } catch (e) { showError(e); } };
+$('egoAlertAck').onclick = async () => {
+  for (const a of shownAlerts) dismissedAlerts.add(a.id);
+  renderAlerts([]);
+  try { await api('POST', '/console/alerts/ack'); refreshChat(); } catch (e) { showError(e); }
+};
 $('chatStop').onclick = async () => { try { await api('POST', '/console/chat/stop', { agent: chatTarget }); refreshChat(); } catch (e) { showError(e); } };
 $('chatReset').onclick = async () => { try { await api('POST', '/console/chat/reset', { agent: chatTarget }); refreshChat(); } catch (e) { showError(e); } };
 renderTarget();
