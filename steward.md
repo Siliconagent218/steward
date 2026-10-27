@@ -1291,17 +1291,19 @@ steward（fork 仓库根目录）
 | 场景数据模型 | 第 4.2 节的 `SceneState`：WS 与 ES 共用的数据结构；`validate_world` / `validate_ego` 两种校验，ES 中出现 `w:` 标识即判定为信息泄漏；WSim 与 ESim 共用的 `SceneState → MJCF` 转换器；实体有向包围盒计算 |
 | 资产 | 生成器：建筑外壳、操作台、餐边柜、餐桌、带抽屉的柜子、杯子、盘子、碗、Phase 0 移动操作机器人；MuJoCo 物理校验（编译、质量、跌落、倾倒、穿透）；多视角预览渲染；按模板哈希寻址、带版本的资产库；也接受直接编写的实体模板 |
 | 场景与 Scenario | 从已发布资产组合场景（地面摆放或放在其他实体上），检查相互穿透与沉降；保存与加载 Scenario；`phase0-kitchen`（把杯子放到桌上）与 `phase0-shuttle`（循环搬运，`steward up` 的默认 Scenario）两个厨房 |
-| 循环搬运任务 | 杯子和碗在餐桌 → 柜子 → 餐边柜 → 餐桌之间轮转：三件家具始终空一件，每步搬运下一站空着的那件物品，从不在同一件家具上堆放两件；每步从 ES 判断物品位置，风险超限时先靠近观察；`steward shuttle` 逐步显示进度并用 World State 核对，`--steps 0` 持续循环 |
+| 循环搬运任务 | 杯子和碗在餐桌 → 柜子 → 餐边柜 → 餐桌之间轮转：三件家具始终空一件，每步搬运下一站空着的那件物品，从不在同一件家具上堆放两件；每步从 ES 判断物品位置，风险超限时先靠近观察；`steward shuttle` 逐步显示进度并用 World State 核对，`--steps 0` 持续循环。持续循环时单步失败不终止任务：先把手中物品放到空闲家具上，再环顾刷新 ES 后继续；被移到循环外（如操作台）的物品会被搬回空闲家具 |
 | WSim | 固定步长物理，按墙钟倍速推进；机器人底盘、升降、伸缩位置控制；理想抓取；带噪声的里程计与关节编码器；理想检测器（视野、遮挡、距离相关噪声、类别混淆）；World State 读回与「支撑」「附着」关系推导；总览与机器人相机渲染 |
 | Steward 主机 | 世界控制接口 WCA（状态、World State、时钟、Episode、渲染、Observer 报告、资产 / 场景 / Scenario 编写）；每个机器人一个独立端口，只提供传感器、相机、执行器命令与单向遥测 |
 | Ego Runtime | 检测融合为 ES（机器人自分配 `e:` id、卡尔曼位置融合、类别分布、存在概率、重复轨迹合并、支撑与附着关系）；基于 ES 的二维路径规划、停靠足迹检查与预停靠点原地转身空间检查；简化 ESim 与 Prediction Receipt（放置点优先远离边缘）；导航、抓取、放置、环顾技能；执行现场的安全检查：停靠位姿偏差、抓取前夹爪对准、松手前夹爪须在台面范围内，否则不松手并报告失败；Ego API；运行端再次核验收据 |
 | Observer | ES 与 World State 关联；召回率、误检、位置误差、类别准确率、NEES、自定位误差；JSONL 记录；泄漏检测 |
 | Ego Harness bundle | `ctx.ego` 服务定义与 HTTP 提供者；机器人工具 `ego_state`、`ego_query`、`ego_observe`、`ego_explore`、`ego_predict`、`skill_run`、`skill_status`、`body_stop`；安全守卫（`tools/pre-execute` 收据核验、`ctx.tools.guard` 最终否决、`/estop` 急停）；禁用继承自 `dsh-base` 的 shell、文件、网页、工作流、后台任务与工作目录工具，机器人只能经 `ctx.ego` 感知与行动 |
-| World Harness bundle | `ctx.world` 服务定义与 HTTP 提供者；工具 `world_status`、`world_scene`、`asset_search`、`asset_get`、`asset_create`、`asset_preview`、`asset_publish`、`scene_compose`、`scene_render`、`scenario_save`、`world_catalog`、`episode_control`、`world_clock`、`observer_report` |
+| World Harness bundle | `ctx.world` 服务定义与 HTTP 提供者；工具 `world_status`、`world_scene`、`asset_search`、`asset_get`、`asset_create`、`asset_preview`、`asset_publish`、`scene_compose`、`scene_render`、`scenario_save`、`world_catalog`、`episode_control`、`world_clock`、`world_edit`、`observer_report` |
+| 运行中世界编辑 | WCA `POST /wca/edit`，不停止 Episode：`move` 移动物体或家具（`at` 地面位置或 `on` 支撑实体加偏移；移动家具时其上的物体随之移动），`spawn` 从已发布资产新增实体，`remove` 删除实体（其上物体自然掉落）。新增与删除在主线程重新编译 MuJoCo 模型，按名称迁移关节状态、执行器目标、仿真时间与机器人抓取。编辑后若与其他实体穿透超过 1 厘米则撤销并拒绝；机器人、建筑与机器人手中的物体不可编辑。每次编辑记为 `world/edit` 事件（`plausibility: god-mode`）；机器人不会收到通知，只能靠自身感知发现变化 |
+| 控制台对话 | 控制台右侧（窄屏时在主视图下方）的「世界编辑对话」：每条消息由主机以 `dsh --profile world-task --json` 交给 WH 处理，首条消息开启 DSH Session，之后用 `--session-id` 接续同一会话；`--patch` 叠加层把 `steward-world-api` 指向本主机的 WCA。主机读取 NDJSON 运行事件，控制台实时显示 WH 的回复与每次工具调用（可展开查看参数与结果）。主机为 WH 附加操作说明：先 `world_scene` 再 `world_edit`，不启停 Episode、不使用 shell 或文件工具。`steward up` / `steward world` 默认使用 `var/dsh/world`，`--world-harness ''` 关闭对话 |
 | Steward 控制台 | 浏览器页面 `http://127.0.0.1:7400/console`（由 WCA 端口提供，属于 Steward 平面）。主视图是共用同一斜上方相机的两个面板：左为 World State（WSim 的 MuJoCo 自由相机渲染），右为机器人的 Ego State（ES 经与 ESim 相同的 SceneState → MJCF 转换器渲染：只有已感知的物体，按类别着色，存在概率低时变淡，机器人位于自身估计位姿），并叠加 2σ 不确定度圈、标签与到真实位置的误差线。两个面板同步拖动旋转、滚轮缩放，预设斜上方南 / 东南 / 西南与正上方视角；靠近相机一侧的墙体自动剖切（只影响渲染）。下方为机器人头部相机（约每 0.33 秒刷新）、俯视地图、Observer 指标与误差曲线、抓放事件；顶栏可暂停 / 继续 / 倍速 / 重置 / 切换 Scenario |
 | 主线程渲染 | macOS 上 OpenGL 必须在主线程运行：相机渲染、资产预览、Ego State 渲染、Episode 加载与重置都由请求线程排队、主线程执行；没有主线程服务时请求超时而不阻塞物理。关闭渲染器前先切换到它自己的 OpenGL 上下文（`mujoco.Renderer.close` 不会这样做，会误删其他渲染器的 GPU 资源） |
 | Episode 切换 | ER 检测到世界时钟倒退即视为重新开机，清空 ES、收据并取消正在执行的技能 |
-| 检查与工具 | pytest 33 项；DSH 单元测试与跨语言集成测试 5 项；三个 profile 的组合配置快照比对；多随机种子回归脚本；命令行 `steward build-kitchen / world / ego / up / demo`；运行脚本 `run-ego.sh`、`run-world.sh` |
+| 检查与工具 | pytest 39 项；DSH 单元测试与跨语言集成测试 6 项；三个 profile 的组合配置快照比对；多随机种子回归脚本；命令行 `steward build-kitchen / world / ego / up / demo`；运行脚本 `run-ego.sh`、`run-world.sh` |
 
 ### 13.3 实际布局
 
@@ -1312,7 +1314,7 @@ steward/
 │   ├── scene/                       # SceneState 数据结构、validate_world / validate_ego、SceneState → MJCF、包围盒
 │   ├── assets/                      # 资产生成器、物理校验、预览渲染、内容寻址资产库
 │   ├── authoring/                   # 资产创建与发布、场景组合与检查、Scenario、默认厨房
-│   ├── world/                       # WSim（物理、理想抓取、理想检测器）、Steward 主机（WCA 与机器人端口）、浏览器控制台
+│   ├── world/                       # WSim（物理、理想抓取、理想检测器、运行中编辑）、Steward 主机（WCA 与机器人端口）、浏览器控制台、WH 对话桥
 │   ├── ego/                         # ER：估计器、规划器、ESim、技能执行、Ego API
 │   ├── observer/                    # Observer：ES 与 GT 对比、NEES、JSONL 记录
 │   ├── mission.py                   # 只经 Ego API 的脚本化任务「把杯子放到桌上」
@@ -1358,7 +1360,12 @@ uv sync
 .venv/bin/steward up
 
 # 用浏览器打开 Steward 控制台（steward up 或 steward world 运行期间）
+# 「世界编辑对话」需要先运行 ./scripts/setup-dsh-profiles.sh 并在 .env 中配置模型 key
 open http://127.0.0.1:7400/console
+
+# 不经 WH，直接调用 WCA 编辑运行中的世界
+curl -X POST http://127.0.0.1:7400/wca/edit -H 'content-type: application/json' \
+  -d '{"action": "move", "entity": "w:cup-1", "on": "w:sideboard-1", "offset": [0.1, 0]}'
 
 # 分别运行世界与机器人（可放在不同进程或机器上）
 .venv/bin/steward world --wca-port 7400 --robot-port 7410
@@ -1410,6 +1417,8 @@ EH profile 默认从上游 `headless` 模板派生（设置 `ROBOT_TEMPLATE=web`
 | 模型驱动：机器人 | DeepSeek 模型经 `run-ego.sh` 在默认厨房与 WH 生成的 `llm-kitchen` 中都自主完成「把杯子放到桌上」（环顾 → 预测 → 靠近 → 抓取 → 放置 → 自查），World State 确认；Observer 平均位置误差 0.5–1.0 厘米，无泄漏；运行中未调用任何 shell 或文件工具 |
 | 模型驱动：WH | DeepSeek 模型经 `run-world.sh` 根据文字描述新建并发布 3 个资产（房间、操作台、小餐桌），全部通过物理校验；复用杯、碗、盘与机器人组合出 `llm-kitchen` 场景并保存同名 Scenario；该 Scenario 可经 WCA 加载 |
 | 循环搬运 | `steward shuttle --steps 12`：四整轮共 12 次搬运全部由 World State 逐步确认；pytest 覆盖前三步的轮转顺序与「任何时刻两件物品不在同一家具上」 |
+| 运行中世界编辑 | pytest 覆盖：移动到其他支撑面、移动餐桌时盘子随之移动、穿透与受保护实体被拒且世界不变、新增与删除后仿真时间 / 机器人位姿 / 执行器目标不变、WCA 接受省略 `w:` 前缀的 id；DSH 单元测试覆盖 `world_edit` 参数到 WCA 请求的映射 |
+| 控制台对话（模型驱动） | 循环搬运进行中，在控制台输入「在餐桌上再放一个盘子」：WH 依次调用 `world_scene`、`asset_search`、`world_edit spawn`、`world_scene` 核对，约 11 秒完成；接着输入「把盘子 plate-1 从操作台挪到餐桌上，放在新盘子旁边」，WH 沿用同一 Session 直接 `world_edit move`，机器人任务未中断 |
 | 能力边界 | EH 的组合配置中 `tool-bash`、`tool-pwsh`、`tool-jobs`、`tool-fs`、`tool-fs-search`、`tool-web`、`tool-workflow`、`tool-working-directory` 均为禁用，变化纳入快照比对 |
 
 ### 13.6 与设计的偏差
@@ -1423,7 +1432,7 @@ EH profile 默认从上游 `headless` 模板派生（设置 `ROBOT_TEMPLATE=web`
 | 精细抓取 | 理想抓取：夹爪闭合时 5–6 厘米捕获半径内的物体被刚性附着；机械臂与夹爪为纯可视部件，不推动物体 | Phase 3 |
 | ESim 物理推演与信念采样 | 几何与概率评估：路径与足迹碰撞检查、由位置不确定度计算抓空概率；收据携带计划，执行即执行该计划 | Phase 2 |
 | 机器人 `map` 坐标系与世界坐标系不同 | 里程计近似理想，`map` 与 `world` 重合 | Phase 1 引入定位误差与配准 |
-| 扰动、触发器、扰动策略守卫 | 未实现 | Phase 2 |
+| 扰动、触发器、扰动策略守卫 | 只有人工发起的瞬移式编辑（`god-mode`：移动、新增、删除，带穿透检查）；没有物理可行的扰动方式、触发器与扰动策略守卫 | Phase 2 |
 | WH 经 SDK 向机器人派发任务（`task_dispatch`） | 未实现；实验员直接向 EH 下达任务 | Phase 2 |
 | EH 工具返回相机图像 | `ego_observe` 只返回文字结果与图像文件路径；WH 预览图通过上游文件读取工具查看 | Phase 1 接入附件服务 |
 | WH 能力边界 | WH 保留 `dsh-base` 的通用工具（shell、文件等），可读取预览图，也能自行启动进程；验收中它曾自行启动一个世界进程来验证新场景 | Phase 1 评审是否限制 WH 的 shell，或提供专用的场景验证工具 |

@@ -18,7 +18,8 @@ import threading
 import time
 from pathlib import Path
 
-DEFAULT_ROOT = Path(__file__).resolve().parents[2] / "var" / "steward"
+STEWARD_DIR = Path(__file__).resolve().parents[2]
+DEFAULT_ROOT = STEWARD_DIR / "var" / "steward"
 
 
 def _robot_model() -> dict:
@@ -54,7 +55,18 @@ def _host(args, run_dir: Path):
 
     ports = {"w:robot-1": args.robot_port} if getattr(args, "robot_port", 0) else {}
     return StewardHost(args.root, scenario=args.scenario, speed=args.speed, seed=args.seed, run_dir=run_dir,
-                       wca_port=args.wca_port, robot_ports=ports).start()
+                       wca_port=args.wca_port, robot_ports=ports, chat=_chat_config(args)).start()
+
+
+def _chat_config(args):
+    """World Harness chat for the console: the steward-local DSH launcher and world home."""
+    from steward.world.chat import ChatConfig
+
+    if not getattr(args, "world_harness", None):
+        return None
+    home = Path(args.world_harness)
+    return ChatConfig(dsh=STEWARD_DIR / "dsh" / "node_modules" / ".bin" / "dsh", dsh_home=home,
+                      cwd=STEWARD_DIR, env_file=STEWARD_DIR / ".env")
 
 
 def cmd_world(args) -> int:
@@ -195,16 +207,20 @@ def cmd_shuttle(args) -> int:
         else:
             progress = f"[第 {index + 1} 步，第 {index // 3 + 1} 轮]"
         print(f"{progress}  "
-              f"{OBJECT_NAMES.get(move['object'], move['object'])}：{SUPPORT_NAMES[move['from']]} → "
+              f"{OBJECT_NAMES.get(move['object'], move['object'])}：{SUPPORT_NAMES.get(move['from'], '其他位置')} → "
               f"{SUPPORT_NAMES[move['to']]}  World State {'确认' if ok else '不一致'} "
               f"{ {OBJECT_NAMES.get(k, k): SUPPORT_NAMES.get(v, v) for k, v in truth.items()} }  "
               f"({time.monotonic() - t0:.0f}s)", flush=True)
+
+    def on_failure(index: int, message: str) -> None:
+        print(f"[第 {index + 1} 步失败，重新观察后继续]  {message}  ({time.monotonic() - t0:.0f}s)", flush=True)
 
     outcome: dict = {}
 
     def mission() -> None:
         try:
-            outcome["result"] = shuttle(api_url, args.steps, tuple(supports), tuple(objects), on_step=on_step)
+            outcome["result"] = shuttle(api_url, args.steps, tuple(supports), tuple(objects), on_step=on_step,
+                                        on_failure=on_failure)
         except MissionFailed as exc:
             outcome["error"] = str(exc)
 
@@ -245,6 +261,9 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--seed", type=int, default=0)
         p.add_argument("--wca-port", type=int, default=0 if in_process else 7400)
         p.add_argument("--robot-port", type=int, default=0 if in_process else 7410)
+        if not in_process:
+            p.add_argument("--world-harness", default=str(STEWARD_DIR / "var" / "dsh" / "world"),
+                           help="DSH home of the World Harness used by the console chat; '' disables the chat")
         if name == "up":
             p.add_argument("--api-port", type=int, default=7420)
         if name == "shuttle":

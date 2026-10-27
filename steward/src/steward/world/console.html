@@ -48,6 +48,30 @@
   .events { max-height: 140px; overflow: auto; font-size: 12px; color: var(--muted); margin: 8px 0 0; padding-left: 18px; }
   .task { color: var(--muted); }
   .err { color: #ff6b6b; }
+  .top { display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 14px; align-items: stretch; }
+  @media (max-width: 1300px) { .top { grid-template-columns: 1fr; } .chat { height: 560px; } }
+  .chat { display: flex; flex-direction: column; min-height: 0; }
+  .chat .msgs { flex: 1 1 0; min-height: 200px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px;
+                padding: 4px 2px 8px; }
+  .msg { max-width: 92%; padding: 7px 10px; border-radius: 10px; white-space: pre-wrap; word-break: break-word; }
+  .msg.user { align-self: flex-end; background: #1f3a5c; }
+  .msg.assistant { align-self: flex-start; background: #232a33; }
+  .msg.error { align-self: stretch; background: #3a1f24; color: #ffb3b3; font-size: 12px; }
+  .msg.system { align-self: center; color: var(--muted); font-size: 12px; padding: 2px; }
+  .tool { align-self: flex-start; font-size: 12px; color: var(--muted); max-width: 100%; }
+  .tool summary { cursor: pointer; list-style: none; }
+  .tool summary::-webkit-details-marker { display: none; }
+  .tool .ok { color: #3ecf8e; } .tool .bad { color: #ff6b6b; } .tool .run { color: var(--ego); }
+  .tool pre { margin: 4px 0 0; padding: 6px 8px; background: #11151a; border-radius: 6px; max-height: 180px; overflow: auto;
+              white-space: pre-wrap; word-break: break-all; font-size: 11px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
+  .chips button { font-size: 12px; padding: 3px 8px; color: var(--muted); }
+  .composer { display: flex; gap: 8px; align-items: flex-end; }
+  .composer textarea { flex: 1; resize: none; height: 58px; background: #11151a; color: var(--text); border: 1px solid var(--line);
+                       border-radius: 8px; padding: 7px 9px; font: inherit; }
+  .composer textarea:focus { outline: none; border-color: #3c4652; }
+  .composer button { height: 58px; }
+  button:disabled { opacity: .5; cursor: default; }
 </style>
 </head>
 <body>
@@ -67,6 +91,7 @@
   <span class="err" id="error"></span>
 </header>
 <div class="wrap">
+  <div class="top">
   <section class="card">
     <h2>
       斜视主视图（两个面板共用同一相机）
@@ -104,6 +129,20 @@
       <label><input type="checkbox" id="showError" checked>Ego：到真实位置的误差线</label>
     </div>
   </section>
+  <section class="card chat">
+    <h2>世界编辑对话 <span class="pill" id="chatStatus">World Harness</span>
+      <span class="spacer"></span><button id="chatReset" title="开始新的 World Harness 会话">新会话</button></h2>
+    <div class="msgs" id="chatMsgs"></div>
+    <div class="chips" id="chatChips">
+      <button>把杯子挪到餐边柜上</button><button>在餐桌上再放一个碗</button>
+      <button>把盘子拿走</button><button>把餐桌往东挪 30 厘米</button>
+    </div>
+    <div class="composer">
+      <textarea id="chatInput" placeholder="描述要对世界做的修改，Enter 发送，Shift+Enter 换行"></textarea>
+      <button id="chatSend">发送</button>
+    </div>
+  </section>
+  </div>
   <div class="grid3">
     <section class="card">
       <h2 id="robotCamLabel">机器人头部相机</h2>
@@ -362,10 +401,65 @@ function drawMetrics() {
 }
 function drawEvents() {
   const names = { 'grasp/attach': '抓取', 'grasp/release': '放下', 'grasp/miss': '抓空', 'episode/reset': 'Episode 重置' };
+  const edits = { move: '世界修改·移动', spawn: '世界修改·新增', remove: '世界修改·删除' };
   $('events').innerHTML = state.events.slice().reverse().map(e =>
-    `<li>t=${e.t.toFixed(1)} s　${names[e.type] || e.type}${e.entity ? '　' + e.entity : ''}${e.robot ? '（' + e.robot + '）' : ''}</li>`
+    `<li>t=${e.t.toFixed(1)} s　${(e.type === 'world/edit' && edits[e.action]) || names[e.type] || e.type}${e.entity ? '　' + e.entity : ''}${e.robot ? '（' + e.robot + '）' : ''}</li>`
   ).join('') || '<li>暂无</li>';
 }
+
+// --------------------------------------------------------------------- chat
+const TOOL_NAMES = { world_edit: '修改世界', world_scene: '读取世界状态', world_status: '读取运行状态',
+  asset_search: '查找资产', asset_get: '读取资产', world_clock: '仿真时钟' };
+const esc = (s) => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+let chatSig = '', chatBusy = false;
+function toolSummary(m) {
+  const input = m.input && typeof m.input === 'object' ? m.input : {};
+  const brief = m.tool === 'world_edit'
+    ? [input.action, input.entity, input.asset, input.on ? `→ ${input.on}` : '', input.x != null ? `(${input.x}, ${input.y})` : ''].filter(Boolean).join(' ')
+    : '';
+  const mark = m.status === 'completed' ? '<span class="ok">✓</span>' : m.status === 'error' ? '<span class="bad">✗</span>' : '<span class="run">…</span>';
+  return `${mark} ${esc(TOOL_NAMES[m.tool] || m.tool)}${brief ? '　' + esc(brief) : ''}`;
+}
+function renderChat(chat) {
+  const box = $('chatMsgs');
+  const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+  const open = new Set([...box.querySelectorAll('details[open]')].map(d => d.dataset.id));
+  box.innerHTML = chat.messages.map(m => m.role === 'tool'
+    ? `<details class="tool" data-id="${m.id}"${open.has(String(m.id)) ? ' open' : ''}><summary>${toolSummary(m)}</summary>`
+      + `<pre>${esc(JSON.stringify(m.input, null, 1))}</pre>${m.text ? `<pre>${esc(m.text)}</pre>` : ''}</details>`
+    : `<div class="msg ${m.role}">${esc(m.text)}</div>`).join('')
+    || '<div class="msg system">在下方描述要修改的物体或位置；World Harness（DSH）会读取世界状态并调用 world_edit 执行，机器人需要自己发现变化。</div>';
+  if (chat.busy) box.insertAdjacentHTML('beforeend', '<div class="msg system">World Harness 正在处理…</div>');
+  if (nearBottom) box.scrollTop = box.scrollHeight;
+}
+async function refreshChat() {
+  try {
+    const chat = await api('GET', '/console/chat');
+    chatBusy = chat.busy;
+    $('chatSend').disabled = chat.busy || !chat.available;
+    $('chatStatus').textContent = !chat.available ? '不可用' : chat.busy ? '处理中' : chat.sessionId ? '会话进行中' : 'World Harness';
+    $('chatStatus').title = chat.reason || chat.sessionId || '';
+    const sig = JSON.stringify([chat.busy, chat.messages]);
+    if (sig !== chatSig) { chatSig = sig; renderChat(chat); }
+    if (!chat.available && !chat.messages.length) $('chatMsgs').innerHTML = `<div class="msg error">${esc(chat.reason)}</div>`;
+  } catch (e) { showError(e); }
+}
+async function sendChat(text) {
+  text = (text ?? $('chatInput').value).trim();
+  if (!text || chatBusy) return;
+  try {
+    await api('POST', '/console/chat', { message: text });
+    $('chatInput').value = '';
+    chatBusy = true;
+    refreshChat();
+  } catch (e) { showError(e); }
+}
+$('chatSend').onclick = () => sendChat();
+$('chatInput').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendChat(); }
+});
+$('chatChips').querySelectorAll('button').forEach(b => b.onclick = () => { $('chatInput').value = b.textContent; $('chatInput').focus(); });
+$('chatReset').onclick = async () => { try { await api('POST', '/console/chat/reset'); refreshChat(); } catch (e) { showError(e); } };
 
 function refreshRobotCamera() {
   const img = $('camRobot');
@@ -395,6 +489,8 @@ refresh().then(loadScenarios);
 setInterval(refresh, 500);
 setInterval(requestRenders, 400);
 setInterval(refreshRobotCamera, 333);
+refreshChat();
+setInterval(refreshChat, 800);
 </script>
 </body>
 </html>

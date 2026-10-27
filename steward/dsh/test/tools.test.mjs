@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { egoTools } from '@steward/dsh-tool-ego'
+import { worldTools } from '@steward/dsh-tool-world'
 import { receiptDenial, reviewExecution } from '@steward/dsh-robot-safety'
 
 function fakeEgo(receipts = {}) {
@@ -57,6 +58,22 @@ test('skill_run waits for completion by default', async () => {
   const result = await tool(egoTools(ego), 'skill_run').execute({ receipt: 'rcpt-1' }, exec('skill_run'))
   assert.deepEqual(ego.calls.map(c => c[0]), ['run', 'wait'])
   assert.equal(result.state, 'succeeded')
+})
+
+test('world_edit maps floor and support placements to World Control API edits', async () => {
+  const edits = []
+  const world = { edit: async (request) => { edits.push(request); return { ok: true, ...request } } }
+  const edit = tool(worldTools(world), 'world_edit')
+  await edit.execute({ action: 'move', entity: 'w:cup-1', on: 'w:sideboard', offset_x: 0.1 }, exec('world_edit'))
+  await edit.execute({ action: 'spawn', entity: 'w:bowl-2', asset: 'bowl', x: 1, y: -0.5, yaw: 0.3 }, exec('world_edit'))
+  await edit.execute({ action: 'remove', entity: 'w:plate-1' }, exec('world_edit'))
+  assert.deepEqual(edits, [
+    { action: 'move', entity: 'w:cup-1', on: 'w:sideboard', offset: [0.1, 0] },
+    { action: 'spawn', entity: 'w:bowl-2', asset: 'bowl', at: { x: 1, y: -0.5 }, yaw: 0.3 },
+    { action: 'remove', entity: 'w:plate-1' },
+  ])
+  await assert.rejects(edit.execute({ action: 'move', entity: 'w:cup-1', x: 1 }, exec('world_edit')), /both x and y/)
+  await assert.rejects(edit.execute({ action: 'spawn', entity: 'w:x', asset: 'cup' }, exec('world_edit')), /needs a placement/)
 })
 
 test('safety policy denies skill_run without a receipt, with an unknown one, or above the risk limit', async () => {

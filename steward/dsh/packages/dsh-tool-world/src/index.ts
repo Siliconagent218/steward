@@ -9,7 +9,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool, type InferValue, type ToolDefinition } from '@deepseek-ai/dsh-tools'
-import type { JsonObject, WorldService } from '@steward/dsh-world'
+import type { JsonObject, WorldEditRequest, WorldService } from '@steward/dsh-world'
 
 export const name = 'steward-tool-world'
 export const inject = ['tools', 'world']
@@ -210,6 +210,44 @@ export function worldTools(world: WorldService): ToolDefinition[] {
       output: { schema: JSON_OUTPUT, render: (_a, v) => text(v) },
       async execute(args, exec) {
         return json(await world.clock(args.action, args.value, exec.signal))
+      },
+    }),
+    defineTool({
+      name: 'world_edit',
+      description: 'Change the running World State without stopping the episode (robots keep working and must '
+        + 'notice the change themselves). move: relocate an object or piece of furniture; objects resting on moved '
+        + 'furniture move with it. spawn: add a new entity from a published asset (see asset_search). remove: delete '
+        + 'an entity; objects resting on it fall. Place with x/y (floor position in metres, world frame) or with on '
+        + '(support entity id, e.g. "w:table") plus offset_x/offset_y in the support frame. yaw in radians; move keeps '
+        + 'the current yaw when omitted. Robots, the building and objects a robot is holding cannot be edited; an edit '
+        + 'that would interpenetrate another entity is rejected and leaves the world unchanged. Read world_scene first '
+        + 'for ids and positions.',
+      parameters: {
+        action: { type: 'string', enum: ['move', 'spawn', 'remove'], required: true, description: 'Edit kind.' },
+        entity: { type: 'string', required: true, description: 'Entity id, e.g. "w:cup-1"; for spawn a new unique id.' },
+        asset: { type: 'string', description: 'Published asset name for spawn, e.g. "cup".' },
+        x: { type: 'number', description: 'Floor x position in metres.' },
+        y: { type: 'number', description: 'Floor y position in metres.' },
+        on: { type: 'string', description: 'Support entity id to place on, e.g. "w:sideboard".' },
+        offset_x: { type: 'number', description: 'x offset on the support, in the support frame (default 0).' },
+        offset_y: { type: 'number', description: 'y offset on the support, in the support frame (default 0).' },
+        yaw: { type: 'number', description: 'Heading in radians.' },
+      },
+      output: { schema: JSON_OUTPUT, render: (_a, v) => text(v) },
+      async execute(args, exec) {
+        const request: WorldEditRequest = { action: args.action, entity: args.entity }
+        if (args.asset !== undefined) request.asset = args.asset
+        if (args.on !== undefined) {
+          request.on = args.on
+          request.offset = [args.offset_x ?? 0, args.offset_y ?? 0]
+        } else if (args.x !== undefined || args.y !== undefined) {
+          if (args.x === undefined || args.y === undefined) throw new Error('give both x and y, or on')
+          request.at = { x: args.x, y: args.y }
+        } else if (args.action !== 'remove') {
+          throw new Error(`${args.action} needs a placement: x and y, or on`)
+        }
+        if (args.yaw !== undefined) request.yaw = args.yaw
+        return json(await world.edit(request, exec.signal))
       },
     }),
     defineTool({

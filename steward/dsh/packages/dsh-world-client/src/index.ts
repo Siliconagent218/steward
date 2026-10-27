@@ -6,7 +6,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { WorldError, WorldService } from '@steward/dsh-world'
-import type { AssetCreateRequest, JsonObject } from '@steward/dsh-world'
+import type { AssetCreateRequest, JsonObject, WorldEditRequest } from '@steward/dsh-world'
 import { baseUrl, HttpJsonError, requestJson } from '@steward/http-json'
 
 /** Validated plugin configuration. */
@@ -59,6 +59,10 @@ export class WorldApiClient extends WorldService {
 
   clock(action: 'pause' | 'resume' | 'speed', value: number | undefined, signal?: AbortSignal): Promise<JsonObject> {
     return this.call('POST', '/wca/clock', { action, value }, signal)
+  }
+
+  edit(request: WorldEditRequest, signal?: AbortSignal): Promise<JsonObject> {
+    return this.call('POST', '/wca/edit', request, signal, true)
   }
 
   observerReport(signal?: AbortSignal): Promise<JsonObject> {

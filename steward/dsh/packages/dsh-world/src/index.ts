@@ -35,6 +35,21 @@ export interface AssetCreateRequest {
   template?: JsonObject
 }
 
+/**
+ * One live World State edit. `move` relocates an object or furniture (objects resting on moved
+ * furniture move with it), `spawn` adds an entity from a published asset, `remove` deletes one.
+ * Placement is `at` (floor position) or `on` (support entity id) with `offset` in the support frame.
+ */
+export interface WorldEditRequest {
+  action: 'move' | 'spawn' | 'remove'
+  entity: string
+  asset?: string
+  at?: { x: number; y: number; yaw?: number }
+  on?: string
+  offset?: [number, number]
+  yaw?: number
+}
+
 /** The `world` service. Every method accepts the caller's cancellation signal. */
 export abstract class WorldService extends Service {
   constructor(ctx: Context) {
@@ -72,6 +87,15 @@ export abstract class WorldService extends Service {
    * @returns the clock state.
    */
   abstract clock(action: 'pause' | 'resume' | 'speed', value: number | undefined, signal?: AbortSignal): Promise<JsonObject>
+
+  /**
+   * Apply one edit to the running World State without stopping the episode. The host rejects
+   * edits that would interpenetrate other entities or touch robots, buildings and held objects.
+   * @param request - the edit.
+   * @param signal - caller cancellation.
+   * @returns the applied edit with the resulting pose.
+   */
+  abstract edit(request: WorldEditRequest, signal?: AbortSignal): Promise<JsonObject>
 
   /**
    * Observer evaluation of every robot's Ego-State against the World State.

@@ -10,7 +10,7 @@ import itertools
 import math
 import time
 
-from steward.net import call
+from steward.net import HttpError, call
 
 
 class MissionFailed(RuntimeError):
@@ -103,58 +103,103 @@ def cup_to_table(api: str, timeout_s: float = 180.0) -> dict:
 
 
 def shuttle(api: str, steps: int, supports: tuple[str, ...] = ("table", "cabinet", "sideboard"),
-            objects: tuple[str, ...] = ("cup", "bowl"), on_step=None, timeout_s: float = 180.0) -> dict:
+            objects: tuple[str, ...] = ("cup", "bowl"), on_step=None, timeout_s: float = 180.0,
+            on_failure=None) -> dict:
     """Carry objects around the cycle of support categories, one move per step; ``steps <= 0``
     repeats until the caller stops the process.
 
     With fewer objects than supports one support is always free: each step moves the object
     whose next support in the cycle is empty, so no support ever holds two carried objects.
-    Objects and supports are located in the Ego-State by category at every step.
-    ``on_step(index, record)`` is called after each completed move.
+    An object found anywhere else (for example moved by a world edit) is brought back to a free
+    support. Objects and supports are located in the Ego-State by category at every step.
+    ``on_step(index, record)`` is called after each completed move. A bounded run stops at the
+    first failed step; an endless run reports it through ``on_failure(index, message)``, puts
+    down anything still held, looks around again and continues, so the world may be edited
+    while it runs.
     """
     if len(objects) >= len(supports):
         raise ValueError("the shuttle needs more supports than objects")
     log = [{"step": "explore", "state": _explore(api, timeout_s)["state"]}]
     moves = []
     for index in (range(steps) if steps > 0 else itertools.count()):
+        if steps > 0:
+            moves.append(_shuttle_step(api, index, supports, objects, log, timeout_s))
+        else:
+            try:
+                moves.append(_shuttle_step(api, index, supports, objects, log, timeout_s))
+            except (MissionFailed, HttpError) as exc:
+                log.append({"step": index + 1, "failed": str(exc)})
+                if on_failure is not None:
+                    on_failure(index, str(exc))
+                _recover(api, supports, objects, log, timeout_s)
+                continue
+        if on_step is not None:
+            on_step(index, moves[-1])
+    return {"log": log, "moves": moves, "summary": call("GET", f"{api}/ego/summary")}
+
+
+def _recover(api: str, supports: tuple[str, ...], objects: tuple[str, ...], log: list, timeout_s: float) -> None:
+    """After a failed step: put a held object on a free support, then look around again."""
+    try:
+        summary = call("GET", f"{api}/ego/summary")
+        held = summary["self"].get("holding")
+        if held is not None:
+            occupied = {o["on"] for o in summary["objects"] if o["on"] and o["id"] != held
+                        and any(o["categories"].get(c, 0.0) >= 0.25 for c in objects)}
+            free = [s for s in (_find(summary, c) for c in supports) if s is not None and s["id"] not in occupied]
+            if free:
+                place = _safe_receipt(api, "place", {"on": free[0]["id"]}, free[0], log)
+                _run(api, place, timeout_s)
+                log.append({"step": "recover-place", "on": free[0]["id"]})
+        log.append({"step": "recover-explore", "state": _explore(api, timeout_s)["state"]})
+    except (MissionFailed, HttpError) as exc:
+        log.append({"step": "recover-failed", "error": str(exc)})
+        time.sleep(2.0)
+
+
+def _shuttle_step(api: str, index: int, supports: tuple[str, ...], objects: tuple[str, ...], log: list,
+                  timeout_s: float) -> dict:
+    """One shuttle move chosen from the current Ego-State; raises :class:`MissionFailed` on failure."""
+    summary = call("GET", f"{api}/ego/summary")
+    found_supports = {cat: _find(summary, cat) for cat in supports}
+    found_objects = {cat: _find(summary, cat) for cat in objects}
+    missing = [c for c, v in {**found_supports, **found_objects}.items() if v is None]
+    if missing:
+        log.append({"step": "explore", "missing": missing, "state": _explore(api, timeout_s)["state"]})
         summary = call("GET", f"{api}/ego/summary")
         found_supports = {cat: _find(summary, cat) for cat in supports}
         found_objects = {cat: _find(summary, cat) for cat in objects}
         missing = [c for c, v in {**found_supports, **found_objects}.items() if v is None]
         if missing:
-            log.append({"step": "explore", "missing": missing, "state": _explore(api, timeout_s)["state"]})
-            summary = call("GET", f"{api}/ego/summary")
-            found_supports = {cat: _find(summary, cat) for cat in supports}
-            found_objects = {cat: _find(summary, cat) for cat in objects}
-            missing = [c for c, v in {**found_supports, **found_objects}.items() if v is None]
-            if missing:
-                raise MissionFailed(f"step {index + 1}: cannot find {missing} in the ego state")
-        support_cat = {v["id"]: cat for cat, v in found_supports.items()}
-        location = {cat: support_cat.get(obj["on"]) for cat, obj in found_objects.items()}
-        for cat in [c for c, loc in location.items() if loc is None]:
-            _approach_to_observe(api, found_objects[cat])
-            refreshed = _find(call("GET", f"{api}/ego/summary"), cat)
-            if refreshed is not None:
-                found_objects[cat] = refreshed
-                location[cat] = support_cat.get(refreshed["on"])
-            log.append({"step": "observe-closer", "target": cat, "foundOn": location[cat]})
-        occupied = {loc for loc in location.values() if loc is not None}
-        choice = None
-        for cat in objects:
-            here = location[cat]
-            if here is None:
-                continue
-            nxt = supports[(supports.index(here) + 1) % len(supports)]
-            if nxt not in occupied:
-                choice = (cat, here, nxt)
-                break
-        if choice is None:
-            raise MissionFailed(f"step {index + 1}: no object can move to a free support; locations {location}")
-        cat, here, nxt = choice
-        _move(api, found_objects[cat], found_supports[nxt], log, timeout_s)
-        record = {"step": index + 1, "object": cat, "from": here, "to": nxt, "objectId": found_objects[cat]["id"],
-                  "supportId": found_supports[nxt]["id"]}
-        moves.append(record)
-        if on_step is not None:
-            on_step(index, record)
-    return {"log": log, "moves": moves, "summary": call("GET", f"{api}/ego/summary")}
+            raise MissionFailed(f"step {index + 1}: cannot find {missing} in the ego state")
+    support_cat = {v["id"]: cat for cat, v in found_supports.items()}
+    location = {cat: support_cat.get(obj["on"]) for cat, obj in found_objects.items()}
+    for cat in [c for c, loc in location.items() if loc is None]:
+        _approach_to_observe(api, found_objects[cat])
+        refreshed = _find(call("GET", f"{api}/ego/summary"), cat)
+        if refreshed is not None:
+            found_objects[cat] = refreshed
+            location[cat] = support_cat.get(refreshed["on"])
+        log.append({"step": "observe-closer", "target": cat, "foundOn": location[cat]})
+    occupied = {loc for loc in location.values() if loc is not None}
+    choice = None
+    for cat in objects:
+        here = location[cat]
+        if here is None:
+            continue
+        nxt = supports[(supports.index(here) + 1) % len(supports)]
+        if nxt not in occupied:
+            choice = (cat, here, nxt)
+            break
+    if choice is None:
+        free = [s for s in supports if s not in occupied]
+        stray = next((c for c in objects if location[c] is None), None)
+        if free and stray is not None:
+            choice = (stray, None, free[0])
+    if choice is None:
+        raise MissionFailed(f"step {index + 1}: no object can move to a free support; locations {location}")
+    cat, here, nxt = choice
+    _move(api, found_objects[cat], found_supports[nxt], log, timeout_s)
+    record = {"step": index + 1, "object": cat, "from": here, "to": nxt, "objectId": found_objects[cat]["id"],
+              "supportId": found_supports[nxt]["id"]}
+    return record

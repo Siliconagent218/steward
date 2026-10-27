@@ -23,7 +23,8 @@ from steward.net import Binary, HttpError, JsonServer
 from steward.observer.observer import Observer
 from steward.world.console import CONSOLE_HTML, console_state
 from steward.world.ego_view import EgoViewRenderer
-from steward.world.sim import WorldSim
+from steward.world.chat import ChatConfig, WorldChat
+from steward.world.sim import EditError, WorldSim
 
 
 @dataclass
@@ -36,8 +37,10 @@ class _MainTask:
 
 class StewardHost:
     def __init__(self, root: Path | str, *, scenario: str | None = None, speed: float = 1.0, seed: int = 0,
-                 run_dir: Path | None = None, wca_port: int = 0, robot_ports: dict[str, int] | None = None):
+                 run_dir: Path | None = None, wca_port: int = 0, robot_ports: dict[str, int] | None = None,
+                 chat: ChatConfig | None = None):
         self.authoring = AuthoringService(root)
+        self.chat = WorldChat(chat, lambda: self.wca.url)
         self.speed = speed
         self.seed = seed
         self.run_dir = run_dir
@@ -113,6 +116,7 @@ class StewardHost:
         return self
 
     def stop(self) -> None:
+        self.chat.stop()
         for server in self.robot_servers.values():
             server.stop()
         self.wca.stop()
@@ -224,7 +228,52 @@ class StewardHost:
                 lambda: a.render_scene_views(b["name"]))}),
             ("GET", "/scenarios"): guard(lambda q, b: {"scenarios": a.list_scenarios()}),
             ("POST", "/scenarios/save"): guard(lambda q, b: a.save_scenario(b)),
+            ("POST", "/wca/edit"): guard(lambda q, b: self.edit(b)),
+            ("GET", "/console/chat"): guard(lambda q, b: self.chat.state(int(q.get("since", 0)))),
+            ("POST", "/console/chat"): guard(lambda q, b: self.chat.send(b.get("message", ""))),
+            ("POST", "/console/chat/reset"): guard(lambda q, b: self.chat.reset()),
         }
+
+    # -------------------------------------------------------------- edits
+    def edit(self, request: dict) -> dict:
+        """Apply one live World State edit (``move``, ``spawn`` or ``remove``) on the main thread.
+
+        Placement fields are ``at`` {x, y, yaw?, z?} or ``on`` (support id) with ``offset``
+        [dx, dy] and ``yaw``. Entity ids may omit the ``w:`` prefix."""
+        sim = self._require_sim()
+        action = request.get("action")
+        entity = request.get("entity")
+        if not entity:
+            raise HttpError(400, "edit needs an entity id")
+        entity = self._world_id(sim, entity, must_exist=action != "spawn")
+        placement = {k: request[k] for k in ("at", "offset", "yaw") if request.get(k) is not None}
+        if request.get("on"):
+            placement["on"] = self._world_id(sim, request["on"], must_exist=True)
+        try:
+            if action == "move":
+                result = self.on_main(lambda: sim.edit_move(entity, placement))
+            elif action == "spawn":
+                if not request.get("asset"):
+                    raise HttpError(400, "spawn needs an asset name")
+                record = self.authoring.library.get(request["asset"], request.get("version"))
+                asset = {"id": request["asset"], "version": record["version"]}
+                result = self.on_main(lambda: sim.edit_spawn(entity, record["template"], placement, asset))
+            elif action == "remove":
+                result = self.on_main(lambda: sim.edit_remove(entity))
+            else:
+                raise HttpError(400, "action must be move, spawn or remove")
+        except EditError as exc:
+            raise HttpError(409, str(exc)) from None
+        return result
+
+    @staticmethod
+    def _world_id(sim: WorldSim, entity: str, *, must_exist: bool) -> str:
+        if entity.startswith("w:"):
+            return entity
+        prefixed = f"w:{entity}"
+        if not must_exist or sim.template.find(prefixed) is not None:
+            return prefixed
+        return entity
 
     # ------------------------------------------------------------ robot port
     def _robot_routes(self, rid: str) -> dict:
