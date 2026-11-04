@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from steward.ego.classify import OVER, SHAPES, classify, fuse_semantics, prototype
-from steward.ego.perception import box_at_yaw, box_of, raised_object_points, segments
+from steward.ego.perception import box_at_yaw, box_of, oversized_bowl_core, raised_object_points, segments
 from steward.ego.planner import Box2D, front_box, protrusion, room_centre
 from steward.ego.priors import compatible, prior
 from steward.math3d import (matrix_from_quat, pose_compose, pose_inverse, quat_from_axis_angle, quat_from_yaw,
@@ -1100,6 +1100,12 @@ class EgoEstimator:
                 track.voxels = _voxelize(pts[low])
         cloud = _points(track.voxels)
         core = raised_object_points(cloud)
+        bowl_core = None
+        if core is None and track.category == "bowl":
+            # A bowl already named, and longer than a bowl can be, still holds a few support voxels
+            # that sit apart from it. The height peel leaves them: they are not above the bowl.
+            bowl_core = oversized_bowl_core(cloud)
+            core = bowl_core
         if core is not None:
             track.voxels = _voxelize(core)
             cloud = _points(track.voxels)
@@ -1119,7 +1125,7 @@ class EgoEstimator:
             wide = track.category in ("counter", "sideboard", "table", "cabinet")
             if wide and missing > 0.08 and deeper > 0.04 and long_seen:
                 centre, size, yaw = full_centre, full_size, full_yaw
-        if max(size[0], size[1]) < SMALL_M and len(track.recent) >= 3:
+        if bowl_core is None and max(size[0], size[1]) < SMALL_M and len(track.recent) >= 3:
             centre = np.median([c for c, _ in track.recent], axis=0)
             size = np.median([z for _, z in track.recent], axis=0)
         parent = self._furniture_of(track) if track.category == "drawer" else None

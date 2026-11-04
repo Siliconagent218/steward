@@ -266,6 +266,32 @@ def _object_core(points: np.ndarray, idx: np.ndarray, min_points: int) -> np.nda
     return chosen
 
 
+def oversized_bowl_core(points: np.ndarray) -> np.ndarray | None:
+    """Compact cluster of a bowl cloud that also holds a separate stretch of its support.
+
+    A bowl is at most about 32 cm across. A longer cloud is that bowl plus support voxels that do
+    not touch it. One connected slab is left whole: the cluster is kept only when it is actually
+    smaller than the cloud it was cut from.
+
+    :param points: map-frame points of one accumulated cloud.
+    :returns: the bowl's points, or ``None``."""
+    if len(points) < 40:
+        return None
+    extent = points.max(axis=0) - points.min(axis=0)
+    horiz = max(float(extent[0]), float(extent[1]))
+    if horiz <= 0.36:
+        return None
+    compact = _largest_compact(points, 20)
+    if compact is None:
+        return None
+    core = points[compact]
+    core_extent = core.max(axis=0) - core.min(axis=0)
+    core_horiz = max(float(core_extent[0]), float(core_extent[1]))
+    if core_horiz > 0.85 * horiz:
+        return None
+    return core
+
+
 def raised_object_points(points: np.ndarray) -> np.ndarray | None:
     """The compact cluster standing on a wide shallow slab, or ``None`` when ``points`` is one object.
 
