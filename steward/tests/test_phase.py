@@ -522,6 +522,60 @@ def test_a_bowl_measured_with_the_table_shrinks_to_the_bowl_and_is_not_completed
     assert track.size[2] < 0.15
 
 
+def test_a_rim_filled_down_to_the_table_becomes_a_wine_glass_and_objects_already_on_it_keep_their_names():
+    """The head camera sees the rim and calls it a bowl. Filling the stem down to the table makes
+    the box too tall for a bowl or a cup, so the name becomes a wine glass. A bowl and a cup whose
+    points already reach the surface stay what they are."""
+    from steward.ego.estimator import _voxelize
+
+    est = EgoEstimator(robot_model=steward_bot().to_dict())
+    table = _remembered("e:table", "table", [0.6, -0.9, 0.378], [1.16, 0.79, 0.755])
+    counter = _remembered("e:counter", "counter", [0.0, 2.18, 0.46], [1.8, 0.6, 0.9])
+    rim = _remembered("e:1", "bowl", [0.50, -1.12, 0.89], [0.08, 0.08, 0.06])
+    rng = np.random.default_rng(6)
+    rim.voxels = _voxelize(np.column_stack([rng.uniform(0.46, 0.54, 40), rng.uniform(-1.16, -1.08, 40),
+                                            rng.uniform(0.86, 0.92, 40)]))
+    rim.mean_rgb = np.array([0.78, 0.80, 0.84])
+    rim.bottom_seen = True
+    rim.semantic_counts = {"bowl": 3.6, "cup": 2.8}
+    rim.semantic_views = 4
+    rim.recent.extend((np.array([0.50, -1.12, 0.89]), np.array([0.08, 0.08, 0.06])) for _ in range(3))
+    bowl = _remembered("e:2", "bowl", [0.72, -1.07, 0.79], [0.20, 0.20, 0.06])
+    bowl.voxels = _voxelize(np.column_stack([rng.uniform(0.62, 0.82, 40), rng.uniform(-1.17, -0.97, 40),
+                                             rng.uniform(0.76, 0.82, 40)]))
+    bowl.mean_rgb = np.array([0.2, 0.55, 0.2])
+    bowl.bottom_seen = True
+    bowl.semantic_counts = {"bowl": 3.0}
+    bowl.semantic_views = 4
+    bowl.recent.extend((np.array([0.72, -1.07, 0.79]), np.array([0.20, 0.20, 0.06])) for _ in range(3))
+    cup = _remembered("e:3", "cup", [-0.50, 2.16, 0.96], [0.08, 0.08, 0.10])
+    cup.voxels = _voxelize(np.column_stack([rng.uniform(-0.54, -0.46, 40), rng.uniform(2.12, 2.20, 40),
+                                            rng.uniform(0.91, 1.01, 40)]))
+    cup.mean_rgb = np.array([0.9, 0.9, 0.92])
+    cup.bottom_seen = True
+    cup.semantic_counts = {"cup": 3.2}
+    cup.semantic_views = 4
+    cup.recent.extend((np.array([-0.50, 2.16, 0.96]), np.array([0.08, 0.08, 0.10])) for _ in range(3))
+    est.tracks = {"e:table": table, "e:counter": counter, "e:1": rim, "e:2": bowl, "e:3": cup}
+    for track in (rim, bowl, cup):
+        est._rebuild_geometry(track, np.array([-1.6, -1.3, 1.2]), 2.0)
+    assert rim.category == "wine_glass"
+    assert rim.size[2] > 0.14
+    assert bowl.category == "bowl"
+    assert cup.category == "cup"
+
+
+def test_a_narrow_cabinet_slice_keeps_its_drawer_name():
+    """A cabinet face taller than a drawer prior keeps the drawer name.
+
+    Dropping that name lets the slice be folded into the cabinet and the cabinet grows. Bowl and
+    cup names on a wine-glass-height box are the ones left out."""
+    from steward.ego.estimator import _labels_within_height
+
+    assert "drawer" in _labels_within_height({"drawer": 0.85, "box": 0.4}, 0.40)
+    assert _labels_within_height({"bowl": 0.85, "cup": 0.55}, 0.174) == {}
+
+
 def test_two_names_for_one_glass_merge_and_two_bowls_stay_apart():
     est = EgoEstimator(robot_model=steward_bot().to_dict())
     est.tracks = {
