@@ -829,6 +829,10 @@ class EgoEstimator:
                     continue
                 if abs(a.bottom() - b.bottom()) > 0.08 and abs(a.top() - b.top()) > 0.08:
                     continue
+                # A lid and the box under it share a centre, and each end is within a few centimetres,
+                # but their bodies do not meet. Two names for one object overlap in height.
+                if min(a.top(), b.top()) < max(a.bottom(), b.bottom()) - 0.01:
+                    continue
                 keep, drop = (a, b) if _tighter(a, b) else (b, a)
                 for cat, n in drop.category_counts.items():
                     keep.category_counts[cat] = keep.category_counts.get(cat, 0.0) + n
