@@ -565,6 +565,45 @@ def test_a_rim_filled_down_to_the_table_becomes_a_wine_glass_and_objects_already
     assert cup.category == "cup"
 
 
+def test_a_long_bowl_drops_a_detached_counter_strip_and_a_cup_keeps_one():
+    """Support voxels that do not touch a bowl stretch its box. The bowl keeps the compact cluster.
+
+    A cup with the same kind of tail is left whole: only a track already named bowl is cut, and only
+    when it is longer than a bowl."""
+    from steward.ego.estimator import _voxelize
+
+    est = EgoEstimator(robot_model=steward_bot().to_dict())
+    rng = np.random.default_rng(7)
+    bowl_pts = np.column_stack([rng.uniform(0.36, 0.52, 45), rng.uniform(2.11, 2.24, 45),
+                                rng.uniform(0.90, 0.96, 45)])
+    strip = np.array([[0.60, 2.465, 0.925], [0.68, 2.50, 0.92], [0.70, 2.51, 0.92],
+                      [0.72, 2.52, 0.925], [0.74, 2.53, 0.92]])
+    bowl = _remembered("e:1", "bowl", [0.53, 2.31, 0.93], [0.48, 0.15, 0.07])
+    bowl.voxels = _voxelize(np.vstack([bowl_pts, strip]))
+    bowl.mean_rgb = np.array([0.93, 0.93, 0.95])
+    bowl.bottom_seen = True
+    bowl.semantic_counts = {"bowl": 4.0}
+    bowl.semantic_views = 4
+    swollen = (np.array([0.53, 2.31, 0.93]), np.array([0.50, 0.15, 0.06]))
+    bowl.recent.extend(swollen for _ in range(3))
+    cup_pts = np.column_stack([rng.uniform(-0.54, -0.46, 40), rng.uniform(2.12, 2.20, 40),
+                               rng.uniform(0.90, 1.00, 40)])
+    cup_tail = np.column_stack([rng.uniform(-0.10, -0.02, 8), rng.uniform(2.48, 2.54, 8),
+                                rng.uniform(0.94, 0.96, 8)])
+    cup = _remembered("e:2", "cup", [-0.30, 2.30, 0.95], [0.50, 0.16, 0.10])
+    cup.voxels = _voxelize(np.vstack([cup_pts, cup_tail]))
+    cup.bottom_seen = True
+    est.tracks = {"e:1": bowl, "e:2": cup}
+    est._rebuild_geometry(bowl, np.array([-1.8, -1.2, 1.2]), 2.0)
+    est._rebuild_geometry(cup, np.array([-1.8, -1.2, 1.2]), 2.0)
+    assert bowl.category == "bowl"
+    assert max(bowl.size[0], bowl.size[1]) < 0.25
+    assert abs(float(bowl.pos[0]) - 0.44) < 0.06 and abs(float(bowl.pos[1]) - 2.175) < 0.06
+    assert cup.category == "cup"
+    assert max(cup.size[0], cup.size[1]) > 0.40
+    assert cup.size[2] > 0.08
+
+
 def test_a_narrow_cabinet_slice_keeps_its_drawer_name():
     """A cabinet face taller than a drawer prior keeps the drawer name.
 
