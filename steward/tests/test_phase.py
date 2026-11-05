@@ -1121,7 +1121,13 @@ def test_a_small_object_inside_an_open_drawer_stays_its_own_track():
     centre = origin + rot @ np.array([1.05, 0.0, -0.05])
     bear = rng.uniform(centre - np.array([0.05, 0.04, 0.06]), centre + np.array([0.05, 0.04, 0.06]), (80, 3))
     drawer = _remembered("e:14", "drawer", centre.tolist(), [0.56, 0.44, 0.22])
-    est.tracks = {"e:14": drawer}
+    # A drawer with no furniture around it is an orphan edge. This cabinet holds it and stays
+    # under the wall height, so the drawer is not dropped before the bear is seen.
+    z = float(centre[2])
+    top = min(1.10, z + 0.25)
+    cabinet = _remembered("e:4", "cabinet", [float(centre[0]), float(centre[1]), top - 0.40],
+                          [0.90, 0.70, 0.80])
+    est.tracks = {"e:14": drawer, "e:4": cabinet}
     depth = np.zeros((h, w), np.float32)
     mask = np.zeros((h, w), np.uint8)
     _paint(depth, mask, cam, fovy, bear, 1)
@@ -1294,6 +1300,7 @@ def test_a_named_bear_stays_a_bear_when_a_later_view_says_drawer():
                  var=np.full(3, 1e-4), yaw=0.0, yaw_var=1e-3, size=np.array([0.20, 0.15, 0.20]),
                  observations=6, first_seen=0.0, last_seen=1.0, existence=1.0,
                  mean_rgb=np.array([0.4, 0.4, 0.4]))
+    bear.bottom_seen = True
     bear.semantic_counts = {"drawer": 5.0}
     bear.semantic_views = 5
     cloud = np.random.default_rng(0).uniform([0.90, -0.07, 0.60], [1.10, 0.08, 0.80], (200, 3))
@@ -1378,10 +1385,10 @@ def test_an_upper_half_named_box_is_folded_back_into_the_cabinet():
     rgb = np.zeros((h, w, 3), np.uint8)
     rng = np.random.default_rng(2)
 
-    def slab(z0, z1, instance, color):
+    def slab(z0, z1, instance, color, hx=0.28, hy=0.22):
         pts = np.column_stack([
-            rng.uniform(centre[0] - 0.28, centre[0] + 0.28, 400),
-            rng.uniform(centre[1] - 0.22, centre[1] + 0.22, 400),
+            rng.uniform(centre[0] - hx, centre[0] + hx, 400),
+            rng.uniform(centre[1] - hy, centre[1] + hy, 400),
             rng.uniform(z0, z1, 400),
         ])
         _paint(depth, mask, cam, fovy, pts, instance)
@@ -1389,7 +1396,9 @@ def test_an_upper_half_named_box_is_folded_back_into_the_cabinet():
         rgb[ys, xs] = color
 
     slab(0.02, 0.72, 1, (90, 110, 150))  # the body, blue-grey
-    slab(0.74, 0.76, 2, (90, 110, 150))  # the top face, a couple of centimetres above, named box
+    # Narrower than 0.5 m, so it is not dropped as a second copy of the cabinet, and still
+    # wide enough to be the cabinet's upper band rather than an object standing on it.
+    slab(0.52, 0.76, 2, (180, 40, 40), hx=0.16, hy=0.16)
     frame = {"depth": depth, "mask": mask, "rgb": rgb, "fovy": fovy, "header": header,
              "labels": {1: {"cabinet": 0.9}, 2: {"box": 0.8}}}
 
