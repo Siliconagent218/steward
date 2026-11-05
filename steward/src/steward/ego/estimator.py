@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from steward.ego.classify import SHAPES, classify, fuse_semantics, prototype
+from steward.ego.classify import OVER, SHAPES, classify, fuse_semantics, prototype
 from steward.ego.perception import box_at_yaw, box_of, raised_object_points, segments
 from steward.ego.planner import Box2D, front_box, protrusion, room_centre
 from steward.ego.priors import compatible, prior
@@ -426,7 +426,11 @@ class EgoEstimator:
     def category_probs(self, size: np.ndarray, bottom: float, color: np.ndarray, invalid_frac: float,
                        bottom_seen: bool, semantics: dict[str, float] | None) -> dict[str, float]:
         """Category probabilities of a measured box: the shape priors alone, or fused with the
-        segmenter's category scores when it named the region."""
+        segmenter's category scores when it named the region.
+
+        Short names are not dropped here. A cabinet face narrower than 0.3 m is often labelled as
+        a shorter object; dropping that label changes which track the face joins and the cabinet
+        grows. The filled wine glass is renamed in :meth:`_reclassify_filled_height`."""
         if not semantics:
             return classify(size, bottom, color, invalid_frac, bottom_seen=bottom_seen)
         shape = classify(size, bottom, color, invalid_frac, bottom_seen=bottom_seen, min_prob=0.0)
@@ -1190,6 +1194,10 @@ class EgoEstimator:
                 gap = bottom - level
                 size[2] += gap
                 centre[2] -= gap / 2
+                # The name was decided on the visible part. Any gap filled down to the table can
+                # push a rim past a bowl's height, so the category is decided again on the filled box.
+                if gap >= 0.01 and track.mean_rgb is not None:
+                    self._reclassify_filled_height(track, size, centre)
         track.pos = centre
         track.size = size
         track.yaw = yaw
@@ -1199,6 +1207,21 @@ class EgoEstimator:
         var_xy = sigma_depth**2 / views + (completion / 4.0) ** 2 + 0.002**2
         track.var = np.array([var_xy, var_xy, sigma_depth**2 / views + 0.002**2])
         track.yaw_var = 0.05**2 / views
+
+    def _reclassify_filled_height(self, track: Track, size: np.ndarray, centre: np.ndarray) -> None:
+        """Replace the category using the box after it was extended down onto its support.
+
+        Labels whose tallest plausible height is below ``size[2]`` are left out. The shape prior
+        then names the object from the filled height: a rim extended across a stem becomes a
+        wine glass, while the label it was given as a shallow disk does not stay.
+        """
+        mean = {k: v / track.semantic_views for k, v in track.semantic_counts.items()} if track.semantic_views else None
+        if mean:
+            mean = _labels_within_height(mean, float(size[2]))
+        probs = self.category_probs(size, float(centre[2] - size[2] / 2), track.mean_rgb, track.mean_invalid,
+                                    track.bottom_seen, mean or None)
+        weight = float(min(track.observations, 20))
+        track.category_counts = {k: v * weight for k, v in probs.items()}
 
     def _gate(self, track: Track, sigma: float) -> float:
         """Association gate: measurement and track uncertainty, widened for large objects whose
@@ -1905,6 +1928,27 @@ def _absorb_span(keep: Track, drop: Track) -> None:
     if drop.span is None:
         return
     keep.span = _larger_span(keep.span, drop.span)
+
+
+def _labels_within_height(semantics: dict[str, float], height: float) -> dict[str, float]:
+    """``semantics`` without tableware categories whose prior height cannot reach ``height``.
+
+    The prior may be overshot by :data:`OVER`, and a scaled category may be as tall as its largest
+    scale. A measured box above that is not that category. Floor-standing categories and drawers
+    stay: a cabinet slice is often narrower than 0.3 m and taller than a drawer, and dropping
+    ``drawer`` there renames the slice so it is folded into the cabinet.
+    """
+    limit = math.exp(OVER)
+    kept = {}
+    for cat, score in semantics.items():
+        shape = SHAPES.get(cat)
+        if shape is None or shape.get("floor") or cat == "drawer":
+            kept[cat] = score
+            continue
+        hi = shape.get("scale", (1.0, 1.0))[1]
+        if height <= shape["dims"][2] * hi * limit:
+            kept[cat] = score
+    return kept
 
 
 def _tighter(a: Track, b: Track) -> bool:
